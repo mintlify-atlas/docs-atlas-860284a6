@@ -1,0 +1,173 @@
+---
+title: "Pull request guidelines"
+description: "How to open, review, and get your PR merged into VES."
+---
+
+A well-formed pull request is the single most reliable way to get your contribution accepted quickly. This page describes the full PR lifecycle — from opening to merge — and explains what the maintainer looks for when reviewing.
+
+## The PR submission flow
+
+<Steps>
+  <Step title="Fork and clone the repository">
+    Fork VES on GitHub, then clone your fork locally:
+
+    ```bash
+    git clone https://github.com/H3IMD3LL-Labs-Inc/VES.git
+    cd VES
+    ```
+  </Step>
+
+  <Step title="Create a change branch">
+    Follow the [branching guidelines](/contributing/branching) to name your branch:
+
+    ```bash
+    git checkout -b <contribution-type>/<name-of-work>
+    ```
+
+    For example:
+
+    ```bash
+    git checkout -b fix/eof-crash-on-grpc-disconnect
+    ```
+  </Step>
+
+  <Step title="Make your changes">
+    Implement your fix or feature on the change branch. Follow the [code style guidelines](/contributing/code-style). Keep commits small and logical — one commit per self-contained change.
+
+    Stage selectively to avoid bundling unrelated changes:
+
+    ```bash
+    git add -p <file>
+    git commit -m "fix(core-agent): handle EOF on closed gRPC stream gracefully"
+    ```
+  </Step>
+
+  <Step title="Run the test suite locally">
+    Confirm all tests pass before pushing:
+
+    ```bash
+    cargo nextest run
+    ```
+
+    Also run Clippy to catch lint violations before CI does:
+
+    ```bash
+    cargo clippy --all-targets --all-features
+    ```
+  </Step>
+
+  <Step title="Push to your fork">
+    Push your change branch to your fork:
+
+    ```bash
+    git push -u origin <contribution-type>/<name-of-work>
+    ```
+  </Step>
+
+  <Step title="Open a PR against `integration`">
+    Open a pull request on GitHub. Set the **base repository** to `H3IMD3LL-Labs-Inc/VES` and the **base branch** to `integration`.
+
+    <Warning>
+    Do not target `main`. PRs against the source repository's `main` branch are automatically dismissed, regardless of the quality of the changes.
+    </Warning>
+
+    Write a PR title and description that meet the quality bar described below.
+  </Step>
+
+  <Step title="Respond to review feedback">
+    The maintainer will respond between **10 minutes and 24 hours** after your PR is opened. Read every comment carefully. If you disagree with a suggestion, explain your reasoning — do not silently ignore feedback.
+
+    Push additional commits to the same branch to address requested changes. Do not force-push unless specifically asked to.
+  </Step>
+</Steps>
+
+## Writing a good PR title
+
+The title must give a high-level overview of the change at a glance. Generic titles are grounds for rejection:
+
+<CodeGroup>
+
+```text avoid.txt
+fixed stuff
+updates
+bug fixes
+work in progress
+```
+
+```text prefer.txt
+fix(core-agent): handle EOF on closed gRPC stream gracefully
+feat(ves_lib): add SHA-256 fingerprint to PipelineRecord
+docs: add development setup page to contributing section
+```
+
+</CodeGroup>
+
+Use the same imperative style as commit messages, and optionally scope the title to the affected component in parentheses.
+
+## Writing a good PR description
+
+A PR description should cover three things:
+
+1. **What changed** — a detailed explanation of the modifications, not a repeat of the title.
+2. **Why it changed** — the motivation, preferably a link to the GitHub Issue the PR resolves.
+3. **Side effects** — any other parts of the codebase that were touched as a consequence of the primary change, and why.
+
+```markdown
+## Summary
+
+Fixes EOF handling in the gRPC stream reader. When the remote server closes
+the connection cleanly, the stream now returns `Ok(())` rather than panicking.
+
+## Motivation
+
+Closes #42. The agent was crashing on graceful server shutdowns, which made
+rolling restarts of the Heimdell server disruptive.
+
+## Changes
+
+- `components/core-agent/src/transport/grpc.rs`: added `StreamError::Closed`
+  variant and matched on it in the read loop.
+- `components/ves_lib/src/error.rs`: added `ConnectionClosed` to the shared
+  error enum so callers can distinguish clean closes from I/O failures.
+```
+
+## What makes a PR likely to be accepted
+
+| Criterion | Detail |
+|---|---|
+| Targets `integration` | PRs against `main` are auto-dismissed |
+| Meaningful commit messages | Generic messages ("fixed stuff") cause rejection |
+| Clear title and description | Explains what, why, and any side effects |
+| Focused scope | One logical change per PR; unrelated changes split into separate PRs |
+| Tests pass | `cargo nextest run` is green before you push |
+| No new lint violations | `cargo clippy` is clean |
+| Responds to review | Ignoring feedback stalls the PR indefinitely |
+
+## Automated checks
+
+When you open a PR, CI runs automatically. Depending on the PR's scope, it may be approved automatically or require a manual review pass. Check the PR's **Checks** tab for failures — automated bots and the maintainer both leave feedback there.
+
+<Info>
+VES has a single maintainer at the time of writing, so some automated workflows handle initial triage. If a check fails with a message that seems incorrect, leave a comment explaining your interpretation rather than re-pushing to re-trigger CI.
+</Info>
+
+## Review turnaround expectations
+
+Expect feedback within **10 minutes to 24 hours**. If your PR is waiting, that does not mean it will be rejected — the maintainer may be working with another contributor. Start a new change branch and continue contributing while you wait.
+
+## After your PR is merged
+
+Once merged, delete your change branch to keep your fork clean:
+
+```bash
+git branch -d <contribution-type>/<name-of-work>
+git push origin --delete <contribution-type>/<name-of-work>
+```
+
+Sync your fork's `main` branch with the upstream:
+
+```bash
+git fetch upstream
+git merge upstream/main
+git push origin main
+```

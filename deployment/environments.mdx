@@ -1,0 +1,143 @@
+---
+title: "Environment providers"
+description: "Configure how the Core Agent identifies its deployment environment."
+---
+
+Every event the Core Agent forwards to the HEIMDELL Server can carry identity metadata — fields like `node_id`, `hostname`, `region`, and `instance_type` — that tell you exactly where in your infrastructure an event originated. The `environment_provider` setting in your agent config controls how this identity information is gathered.
+
+You set the provider once in the `[agent.identity]` section of your config file. The agent resolves the metadata at startup and attaches it to all outgoing events.
+
+## Choosing a provider
+
+| Provider | Best for | Metadata source |
+|----------|----------|-----------------|
+| `Host` | Most bare-metal and VM deployments | OS hostname via `sysinfo` |
+| `Static` | Custom environments, bare-metal with fixed identity | Values you specify in config |
+| `AwsEc2` | Agents running on EC2 instances | EC2 Instance Metadata Service (IMDS) |
+| `Docker` | Agents running inside Docker containers | Docker container metadata |
+| `Custom` | Non-standard environments requiring custom identity logic | Code you contribute |
+
+## Provider reference
+
+### Host
+
+Reads the hostname directly from the operating system. This is the simplest option and requires no additional configuration.
+
+```toml agent.toml
+[agent.identity]
+node_id    = "web-01"
+environment_provider = "Host"
+```
+
+The `hostname` field on events is populated with the value returned by the OS. The `node_id` is still set manually — `Host` only automates hostname resolution.
+
+---
+
+### Static
+
+Lets you specify every identity field explicitly in the config file. Use this when you are running on bare-metal or in an environment that doesn't have a discoverable metadata service, and you want full control over what gets attached to events.
+
+```toml agent.toml
+[agent.identity]
+node_id     = "db-primary-01"
+hostname    = "db-01.prod.internal"
+environment = "production"
+
+[agent.identity.environment_provider]
+type = "Static"
+```
+
+All identity fields are fixed at the values you provide. They do not change without a config update and agent restart.
+
+---
+
+### AwsEc2
+
+Queries the EC2 Instance Metadata Service (IMDS) at startup to populate identity fields automatically. This is the recommended provider for agents deployed on EC2.
+
+```toml agent.toml
+[agent.identity]
+node_id = "my-node"
+
+[agent.identity.environment_provider]
+type                       = "AwsEc2"
+use_instance_id_in_node_id = true
+use_instance_type          = true
+use_ami_id                 = false
+use_availability_zone      = true
+use_region                 = true
+use_hostname               = true
+```
+
+Each boolean flag controls whether that piece of EC2 metadata is fetched and attached to events:
+
+| Field | Description |
+|-------|-------------|
+| `use_instance_id_in_node_id` | Incorporate the EC2 instance ID (e.g. `i-0abc123def456`) into the `node_id` field |
+| `use_instance_type` | Tag events with the instance type (e.g. `t3.medium`) |
+| `use_ami_id` | Tag events with the AMI ID used to launch the instance |
+| `use_availability_zone` | Tag events with the Availability Zone (e.g. `us-east-1a`) |
+| `use_region` | Tag events with the AWS region (e.g. `us-east-1`) |
+| `use_hostname` | Use the EC2-assigned hostname rather than the OS hostname |
+
+<Tip>
+  Enable `use_instance_id_in_node_id`, `use_availability_zone`, and `use_region` on all EC2-deployed agents. With these three fields, every event carries enough context to unambiguously identify its origin — even across multiple regions and Auto Scaling Groups — without any manual configuration per instance.
+</Tip>
+
+The agent calls IMDS on the link-local address (`http://169.254.169.254`). Ensure your EC2 instance has IMDSv1 or IMDSv2 access enabled. If IMDS is unreachable at startup, the agent falls back to the values provided in the config file.
+
+---
+
+### Docker
+
+Detects container identity from Docker metadata. Use this provider when the Core Agent itself is running as a container and you want container-level identity fields (container ID, image name) attached to events rather than host-level fields.
+
+```toml agent.toml
+[agent.identity]
+node_id = "my-node"
+
+[agent.identity.environment_provider]
+type = "Docker"
+```
+
+The Docker provider reads container metadata from the Docker socket or environment. Ensure the socket is accessible to the agent if running in a constrained network namespace.
+
+---
+
+### Custom
+
+The `Custom` provider is an extension point for environments that don't fit the built-in options. It requires you to implement the identity resolution logic in Rust and contribute it to the VES codebase.
+
+```toml agent.toml
+[agent.identity]
+node_id = "my-node"
+
+[agent.identity.environment_provider]
+type = "Custom"
+```
+
+<Note>
+  `Custom` is an advanced option. If you need it, open an issue on the [VES GitHub repository](https://github.com/H3IMD3LL-Labs-Inc/VES/issues) describing your environment so the maintainers can advise on the best implementation approach.
+</Note>
+
+## Full identity config example
+
+The `[agent.identity]` block also sets the HEIMDELL Server connection and baseline identity fields that all providers use:
+
+```toml agent.toml
+[agent.identity]
+node_id     = "api-server-01"
+hostname    = "api-01.prod.internal"   # overridden by provider if use_hostname = true
+environment = "production"
+
+[agent.identity.environment_provider]
+type                       = "AwsEc2"
+use_instance_id_in_node_id = true
+use_instance_type          = true
+use_ami_id                 = false
+use_availability_zone      = true
+use_region                 = true
+use_hostname               = true
+```
+
+For a full description of the `[agent]` config block, see the [configuration reference](/core-agent/configuration).

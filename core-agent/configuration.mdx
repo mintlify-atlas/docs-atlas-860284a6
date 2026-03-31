@@ -1,0 +1,283 @@
+---
+title: "Configuration"
+description: "Complete reference for the Core Agent configuration schema."
+---
+
+The Core Agent reads a single TOML configuration file on startup. The file is parsed into a `RootConfig` snapshot, validated, and then applied to the running agent. Subsequent snapshots delivered by the HEIMDELL Server Remote API follow the same schema.
+
+The top-level sections are:
+
+| Section | Required | Description |
+|---|---|---|
+| `[agent]` | Yes | Runtime behaviour, identity, networking, and telemetry |
+| `[storage]` | No | LMDB persistence for buffering and config recovery |
+| `[security]` | No | TLS, authentication, and secrets management |
+| `[[sources.filesystem]]` | No | Filesystem source driver instances |
+| `[[sources.journald]]` | No | Journald source driver instances |
+| `[[sources.socket]]` | No | Socket source driver instances |
+
+---
+
+## `[agent]` section
+
+Controls how the Core Agent behaves as a runtime system — identity, data handling, network communication, and resource management.
+
+### `[agent.identity]`
+
+<ParamField path="agent.identity.node_id" type="string" required>
+  Unique identifier for this agent instance. Used in all events and metadata forwarded to the HEIMDELL Server. Must be unique across all agents in your environment.
+</ParamField>
+
+<ParamField path="agent.identity.hostname" type="string">
+  Override the hostname that the agent reports. If omitted, the agent detects the system hostname automatically.
+</ParamField>
+
+<ParamField path="agent.identity.environment" type="string">
+  A free-form environment label attached to all forwarded events. Typically one of `"production"`, `"staging"`, or `"development"`.
+</ParamField>
+
+<ParamField path="agent.identity.environment_provider" type="enum">
+  Controls how environment metadata is sourced. For simple providers (`Host`, `Static`, `Docker`, `Custom`), set as a string. For `AwsEc2`, use a nested table with sub-fields:
+
+  | Value | Description |
+  |---|---|
+  | `"Host"` | Detect hostname from the local OS |
+  | `"Static"` | Use the literal values in `identity.environment` and `identity.hostname` |
+  | `"AwsEc2"` | Enrich identity from EC2 instance metadata. Requires a nested table with boolean sub-fields: `use_instance_id_in_node_id`, `use_instance_type`, `use_ami_id`, `use_availability_zone`, `use_region`, `use_hostname` |
+  | `"Docker"` | Detect container identity from the Docker runtime |
+  | `"Custom"` | Reserved for user-supplied identity providers |
+
+  See [Environment providers](/deployment/environments) for full configuration examples.
+</ParamField>
+
+### `[agent.data_batching]`
+
+Controls how collected events are grouped before being sent to the HEIMDELL Server.
+
+<ParamField path="agent.data_batching.max_events" type="usize" default="1000">
+  Maximum number of events to accumulate in a batch before flushing. A batch is flushed when either `max_events` or `max_batch_bytes` is reached, whichever comes first.
+</ParamField>
+
+<ParamField path="agent.data_batching.max_batch_bytes" type="usize" default="5242880">
+  Maximum size of a single batch in bytes (default 5 MiB). Batches that exceed this threshold are flushed immediately regardless of event count.
+</ParamField>
+
+<ParamField path="agent.data_batching.flush_interval" type="duration" default="5s">
+  Maximum time a batch can sit unflushed, expressed as a duration string (e.g. `"5s"`, `"500ms"`). Ensures events are forwarded even when traffic is low.
+</ParamField>
+
+### `[agent.retries]`
+
+Governs how the agent retries failed deliveries to the HEIMDELL Server.
+
+<ParamField path="agent.retries.max_attempts" type="u32" default="5">
+  Maximum number of delivery attempts before a batch is dropped.
+</ParamField>
+
+<ParamField path="agent.retries.initial_backoff" type="duration" default="1s">
+  Wait duration before the first retry. Subsequent retries use exponential backoff up to `max_backoff`.
+</ParamField>
+
+<ParamField path="agent.retries.max_backoff" type="duration" default="60s">
+  Upper bound on the exponential backoff interval.
+</ParamField>
+
+### `[agent.network]`
+
+Connection settings for the upstream HEIMDELL Server. This entire section is optional; omit it for standalone or air-gapped deployments.
+
+<ParamField path="agent.network.heimdell_server_endpoint" type="string" required>
+  gRPC (or HTTP) endpoint of the HEIMDELL Server. Include the scheme if using HTTP: `"http://server.internal:4317"`. For gRPC without TLS: `"server.internal:4317"`.
+</ParamField>
+
+<ParamField path="agent.network.protocol" type="enum" default="Grpc">
+  Wire protocol to use when forwarding events.
+
+  | Value | Description |
+  |---|---|
+  | `Grpc` | gRPC over HTTP/2 (recommended) |
+  | `Http` | Plain HTTP/1.1 |
+</ParamField>
+
+<ParamField path="agent.network.request_timeout" type="duration" default="30s">
+  Per-request timeout applied to every outbound call to the HEIMDELL Server. Requests that exceed this duration are cancelled and retried according to `retries` settings.
+</ParamField>
+
+<ParamField path="agent.network.compression" type="enum" default="Zstd">
+  Compression algorithm applied to batches before transmission.
+
+  | Value | Description |
+  |---|---|
+  | `Gzip` | Widely compatible; moderate compression ratio |
+  | `Zstd` | Higher compression ratio with lower CPU overhead (recommended) |
+</ParamField>
+
+### `[agent.runtime]`
+
+<ParamField path="agent.runtime.processor_worker_threads" type="usize" default="4">
+  Number of Tokio worker threads dedicated to the processor pipeline. Set to the number of physical CPU cores available to the agent process. Values above the available core count do not improve throughput.
+</ParamField>
+
+<ParamField path="agent.runtime.max_parallel_sources" type="usize" default="16">
+  Maximum number of source driver instances allowed to run concurrently. Exceeding OS file descriptor or port limits is a common misconfiguration — see the [source driver docs](/core-agent/sources) for resource guidance.
+</ParamField>
+
+### `[agent.data_buffering]`
+
+<ParamField path="agent.data_buffering.max_memory_bytes" type="usize" default="104857600">
+  Maximum bytes of in-memory event buffer (default 100 MiB). When the in-memory buffer is full, events overflow to the LMDB persistence layer. Requires `[storage]` to be configured.
+</ParamField>
+
+<ParamField path="agent.data_buffering.backpressure_threshold" type="usize" default="83886080">
+  Byte threshold at which backpressure is signalled to source drivers (default 80 MiB). Source drivers slow down ingestion when this threshold is crossed, preventing uncontrolled memory growth.
+</ParamField>
+
+### `[agent.telemetry]`
+
+<ParamField path="agent.telemetry.metrics_enabled" type="boolean" default="false">
+  Enable the embedded Prometheus metrics endpoint. When `true`, the agent exposes `/metrics` on `metrics_port`.
+</ParamField>
+
+<ParamField path="agent.telemetry.metrics_port" type="u16" default="9090">
+  TCP port for the Prometheus metrics HTTP server. Only used when `metrics_enabled = true`.
+</ParamField>
+
+<ParamField path="agent.telemetry.log_level" type="enum" default="Info">
+  Minimum log level for structured output written to stdout/stderr.
+
+  | Value | Use case |
+  |---|---|
+  | `Trace` | Extremely verbose; do not use in production |
+  | `Debug` | Internal state transitions and detailed error context |
+  | `Info` | Normal operational events (recommended for production) |
+  | `Warn` | Potentially problematic conditions that do not prevent operation |
+  | `Error` | Actionable failures only |
+</ParamField>
+
+---
+
+## `[storage]` section
+
+Configures the LMDB-backed persistence engine used for event buffering and configuration recovery. The `[storage]` section is optional; omit it if you do not need durable buffering or config persistence.
+
+<ParamField path="storage.data_dir" type="string" required>
+  Absolute path to the directory where LMDB data files are stored. The directory must exist and be writable by the agent process before startup. Validation will emit a `PathNotFound` or `PermissionDenied` error if the condition is not met.
+</ParamField>
+
+<ParamField path="storage.storage_engine" type="enum" default="Lmdb">
+  The storage backend to use. Currently the only supported value is `Lmdb`. This field exists to allow alternative backends in future releases.
+</ParamField>
+
+<ParamField path="storage.max_disk_bytes" type="u64">
+  Optional cap on total disk usage by the LMDB environment, in bytes. When the environment approaches this limit the agent applies backpressure and may drop events. If omitted, the LMDB environment grows up to the 1 TiB internal ceiling.
+</ParamField>
+
+<ParamField path="storage.cleanup.max_period_secs" type="u64">
+  Maximum age (in seconds) of data retained in the store. Records older than this threshold are eligible for removal during the next cleanup cycle. If omitted, no age-based eviction is performed.
+</ParamField>
+
+<ParamField path="storage.cleanup.interval_secs" type="u64" required>
+  How often (in seconds) the cleanup task runs. Required when the `[storage.cleanup]` block is present. Typical values range from `300` (5 minutes) to `3600` (1 hour).
+</ParamField>
+
+---
+
+## Complete example
+
+The following file shows a fully populated configuration for a production Linux host:
+
+```toml
+[agent.identity]
+node_id     = "prod-web-01"
+hostname    = "web01.us-east-1.example.com"
+environment = "production"
+
+[agent.identity.environment_provider]
+type                       = "AwsEc2"
+use_instance_id_in_node_id = true
+use_instance_type          = true
+use_ami_id                 = false
+use_availability_zone      = true
+use_region                 = true
+use_hostname               = true
+
+[agent.data_batching]
+max_events      = 2000
+max_batch_bytes = 10485760   # 10 MiB
+flush_interval  = "3s"
+
+[agent.retries]
+max_attempts    = 5
+initial_backoff = "1s"
+max_backoff     = "60s"
+
+[agent.network]
+heimdell_server_endpoint = "heimdell.internal:4317"
+protocol         = "Grpc"
+request_timeout  = "30s"
+compression      = "Zstd"
+
+[agent.runtime]
+processor_worker_threads = 4
+max_parallel_sources     = 8
+
+[agent.data_buffering]
+max_memory_bytes       = 104857600   # 100 MiB
+backpressure_threshold = 83886080    # 80 MiB
+
+[agent.telemetry]
+metrics_enabled = true
+metrics_port    = 9090
+log_level       = "Info"
+
+[storage]
+data_dir        = "/var/lib/ves/core-agent"
+storage_engine  = "Lmdb"
+max_disk_bytes  = 10737418240   # 10 GiB
+
+[storage.cleanup]
+max_period_secs = 86400   # 24 hours
+interval_secs   = 3600    # every hour
+
+[security.tls]
+cert_path       = "/etc/ves/certs/agent.crt"
+key_path        = "/etc/ves/certs/agent.key"
+verify_server   = true
+min_tls_version = "Tls13"
+
+[security.authentication]
+type  = "ApiKey"
+key   = "${VES_API_KEY}"
+
+[security.trust]
+use_system_roots = true
+
+[security.secrets]
+allow_env = true
+
+[[sources.filesystem]]
+id               = "app-logs"
+enabled          = true
+paths            = ["/var/log/myapp"]
+recursive        = true
+include_patterns = [".*\\.log$"]
+exclude_patterns = [".*\\.gz$"]
+file_types       = ["log"]
+
+[[sources.journald]]
+id      = "nginx"
+enabled = true
+units   = ["nginx.service"]
+since   = "cursor:s=abc123"
+
+[[sources.socket]]
+id         = "syslog-tcp"
+enabled    = true
+kind       = "Tcp"
+bind_addr  = { host = "0.0.0.0", port = 5140 }
+max_connections = 50
+
+[sources.socket.tcp_options]
+nodelay         = true
+keep_alive_secs = 60
+```

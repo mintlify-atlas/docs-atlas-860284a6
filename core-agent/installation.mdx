@@ -1,0 +1,163 @@
+---
+title: "Installation"
+description: "Build and install the VES Core Agent from source."
+---
+
+The Core Agent is distributed as source code and compiled locally using the standard Cargo toolchain. There are no pre-built binaries at this stage of the project.
+
+## Prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| **Rust** | 1.89.0 or later | Install via [rustup](https://rustup.rs) |
+| **Git** | Any recent version | Used to clone the repository |
+| **Protobuf compiler (`protoc`)** | Any recent version | Required by the gRPC build dependencies. Install via your package manager or from [protobuf.dev](https://protobuf.dev/installation/) |
+| **Linux** | Any modern distribution | The journald source driver requires a host running systemd. The filesystem and socket drivers work on any Linux system |
+
+<Info>
+  macOS is not an officially supported target for the Core Agent. The filesystem and socket drivers may build and run, but the journald driver requires `libsystemd` which is not available on macOS.
+</Info>
+
+## Build from source
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the VES monorepo to your local machine:
+
+    ```bash
+    git clone https://github.com/H3IMD3LL-Labs-Inc/VES.git
+    cd VES
+    ```
+  </Step>
+
+  <Step title="Build the Core Agent binary">
+    Build only the `core_agent` crate in release mode using Cargo's `-p` flag to select the workspace member:
+
+    ```bash
+    cargo build --release -p core_agent
+    ```
+
+    The first build downloads and compiles all dependencies. On a modern machine with a warm registry cache this typically takes 2–5 minutes. Subsequent builds are incremental.
+
+    The workspace-level `release` profile applies the following optimisations:
+
+    | Setting | Value |
+    |---|---|
+    | Optimisation level | `3` (maximum) |
+    | Link-time optimisation | `true` |
+    | Panic strategy | `abort` |
+    | Debug info | stripped |
+
+  </Step>
+
+  <Step title="Locate the compiled binary">
+    After a successful build the binary is written to:
+
+    ```
+    target/release/core_agent
+    ```
+
+    Copy it to a location on your `PATH` if you want to run it system-wide:
+
+    ```bash
+    sudo cp target/release/core_agent /usr/local/bin/core_agent
+    ```
+  </Step>
+
+  <Step title="Create the configuration file">
+    The Core Agent expects a TOML configuration file. Create a minimal config at `/etc/ves/core_agent.toml`:
+
+    ```bash
+    sudo mkdir -p /etc/ves
+    sudo touch /etc/ves/core_agent.toml
+    ```
+
+    See the [Configuration](/core-agent/configuration) page for a complete reference and example file.
+  </Step>
+
+  <Step title="Create the data directory">
+    The agent's LMDB recovery store needs a writable directory:
+
+    ```bash
+    sudo mkdir -p /var/lib/ves/core-agent
+    sudo chown $(whoami) /var/lib/ves/core-agent
+    ```
+
+    Add the `data_dir` path to your config file (under `[storage]`). Validation will fail with a `PathNotFound` or `PermissionDenied` error if the directory is missing or not writable.
+  </Step>
+
+  <Step title="Start the agent">
+    Run the agent, passing the path to your configuration file:
+
+    ```bash
+    core_agent --config /etc/ves/core_agent.toml
+    ```
+
+    On a successful start you should see structured log output similar to:
+
+    ```
+    {"level":"INFO","message":"Core Agent starting","version":"1.0.0-unstable"}
+    {"level":"INFO","message":"Config loaded","provider":"StaticFile"}
+    {"level":"INFO","message":"Lifecycle state transition","state":"Running"}
+    ```
+  </Step>
+
+  <Step title="Verify the agent is running">
+    If you have enabled the Prometheus metrics endpoint in your config (`telemetry.metrics_enabled = true`), you can verify the agent is running and healthy by fetching the metrics endpoint:
+
+    ```bash
+    curl -s http://localhost:9090/metrics | head -20
+    ```
+
+    A response containing `# HELP` lines confirms the agent is up. Check the structured log output for any `ValidationError` or lifecycle `Failed` transitions if the agent does not start.
+  </Step>
+</Steps>
+
+## Optional: run as a systemd service
+
+To run the Core Agent as a managed systemd service, create a unit file at `/etc/systemd/system/ves-core-agent.service`:
+
+```ini
+[Unit]
+Description=VES Core Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/core_agent --config /etc/ves/core_agent.toml
+Restart=on-failure
+RestartSec=5
+User=ves
+Group=ves
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ves-core-agent
+sudo systemctl status ves-core-agent
+```
+
+<Tip>
+  Create a dedicated `ves` system user with no login shell and restricted home directory when running the agent in production. Grant that user ownership of `/var/lib/ves/core-agent` and read access to the log paths you intend to collect.
+</Tip>
+
+## Development build
+
+For development and debugging, build without the `--release` flag:
+
+```bash
+cargo build -p core_agent
+```
+
+The development profile (`opt-level = 0`, full debug info, debug assertions enabled) produces a binary at `target/debug/core_agent`. Performance is significantly lower than a release build — do not use the debug binary in production.
+
+## Docker
+
+A containerised deployment option is documented at [/deployment/docker](/deployment/docker).

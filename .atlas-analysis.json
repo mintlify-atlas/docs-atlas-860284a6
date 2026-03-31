@@ -1,0 +1,94 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "VES",
+  "projectDescription": "An open-source observability data platform for small teams that collects, processes, and forwards logs and events via a lightweight Rust agent.",
+  "theme": "aspen",
+  "primaryColor": "#2563EB",
+  "lightColor": "#DBEAFE",
+  "darkColor": "#1E3A5F",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Core Agent",
+            "pages": [
+              "core-agent/overview",
+              "core-agent/installation",
+              "core-agent/configuration",
+              "core-agent/sources",
+              "core-agent/security"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/environments",
+              "deployment/upgrading"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/recovery",
+              "operations/monitoring",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Contributing",
+        "groups": [
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/overview",
+              "contributing/development-setup",
+              "contributing/code-style",
+              "contributing/branching",
+              "contributing/pull-requests"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Lightweight Rust-based core agent for log and event collection",
+    "Multiple source drivers: filesystem, journald, and socket (TCP/UDP/Unix)",
+    "LMDB-backed durable recovery and configuration persistence",
+    "Hot-reload configuration lifecycle with diff-based apply and validation",
+    "TLS, mutual-TLS, and API key authentication support",
+    "Prometheus metrics exposition for agent self-monitoring",
+    "Environment-aware identity (AWS EC2, Docker, Host, Static)",
+    "gRPC/Protobuf inter-component communication via ves_lib",
+    "AGPL-3.0 open-source license"
+  ],
+  "publicApiSurface": [
+    "RootConfig — top-level configuration snapshot consumed by the Core Agent",
+    "ConfigManager::process_config — validates, diffs, applies and persists a new config snapshot",
+    "SourcesConfig — filesystem, journald, and socket source driver configurations",
+    "FilesystemSourceConfig — watch paths, patterns and file types for log tailing",
+    "JournaldSourceConfig — systemd journal unit collection settings",
+    "SocketSourceConfig — TCP/UDP/Unix socket listener with optional TLS",
+    "SecurityConfig — global TLS, mTLS, authentication and secret provider settings",
+    "StorageConfig — LMDB storage engine settings and cleanup policy",
+    "LiveState — runtime state machine for the Core Agent lifecycle",
+    "PersistenceEngine — LMDB environment wrapper for durable storage",
+    "SourcePayload / SourceOrigin — canonical event model emitted by source drivers",
+    "ConfigEvent — observable events produced by the configuration lifecycle manager",
+    "validate_root_config — config validation returning typed errors and warnings",
+    "diff_root — computes an Operation diff between two RootConfig snapshots"
+  ]
+}

@@ -1,0 +1,165 @@
+---
+title: "Development setup"
+description: "Set up your local environment to build and develop VES."
+---
+
+This page walks you through installing the required tools, cloning the repository, and running your first build and test suite. The VES codebase is a Cargo workspace targeting Rust edition 2024 with a minimum compiler version of 1.89.
+
+## Required tools
+
+Install the following before proceeding. Builds will fail without them.
+
+| Tool | Minimum version | Install |
+|---|---|---|
+| Rust | 1.89.0 | [rust-lang.org/tools/install](https://rust-lang.org/tools/install/) |
+| Git | any recent | [git-scm.com/install](https://git-scm.com/install/) |
+| Protobuf compiler (`protoc`) | any recent | [protobuf.dev/installation](https://protobuf.dev/installation/) |
+
+<Note>
+The workspace `Cargo.toml` declares `rust-version = "1.89"`. Running an older toolchain will produce an error from Cargo before the first line of source is compiled.
+</Note>
+
+## Recommended tools
+
+These are not required to build VES, but they significantly improve the development experience:
+
+- **rust-analyzer** — IDE integration for type information, completions, and inline diagnostics. Check your editor's extension marketplace.
+- **cargo-watch** — Automatically re-runs a Cargo command when source files change.
+- **cargo-nextest** — A faster, more ergonomic test runner that replaces `cargo test`.
+
+Install the Cargo tools with:
+
+```bash
+cargo install cargo-watch cargo-nextest
+```
+
+## Recommended IDE
+
+The project was built using [Zed](https://zed.dev/download). If you use Zed, the following extensions are recommended:
+
+| Extension | Version used |
+|---|---|
+| TOML | 1.0.1 |
+| Dockerfile | 0.1.0 |
+| Proto | 0.3.1 |
+| Tombi \| TOML Toolkit | 0.2.0 |
+| GitHub Actions | 0.0.1 |
+| MDX | 0.3.0 |
+| wakatime | 0.1.10 |
+
+These are optional quality-of-life additions. Any editor with rust-analyzer support works fine.
+
+## Setup steps
+
+<Steps>
+  <Step title="Fork and clone the repository">
+    Fork the VES repository on GitHub, then clone your fork locally:
+
+    ```bash
+    git clone https://github.com/H3IMD3LL-Labs-Inc/VES.git
+    cd VES
+    ```
+  </Step>
+
+  <Step title="Verify your Rust version">
+    Confirm the active toolchain meets the minimum version requirement:
+
+    ```bash
+    rustc --version
+    ```
+
+    The output should report `rustc 1.89.0` or later. If it does not, update your toolchain:
+
+    ```bash
+    rustup update stable
+    ```
+  </Step>
+
+  <Step title="Verify Protobuf is installed">
+    The `core-agent` component uses Protocol Buffers. Confirm `protoc` is on your `PATH`:
+
+    ```bash
+    protoc --version
+    ```
+
+    If the command is not found, install the Protobuf compiler for your platform before continuing.
+  </Step>
+
+  <Step title="Build the workspace">
+    Build all workspace members at once:
+
+    ```bash
+    cargo build
+    ```
+
+    To build only the agent binary:
+
+    ```bash
+    cargo build -p core_agent
+    ```
+  </Step>
+
+  <Step title="Run the test suite">
+    Using `cargo-nextest` (recommended):
+
+    ```bash
+    cargo nextest run
+    ```
+
+    Using the standard runner if `cargo-nextest` is not installed:
+
+    ```bash
+    cargo test
+    ```
+  </Step>
+
+  <Step title="Start a watch loop for development">
+    To automatically rebuild on every file save:
+
+    ```bash
+    cargo watch -x build
+    ```
+
+    You can also watch and run tests:
+
+    ```bash
+    cargo watch -x "nextest run"
+    ```
+  </Step>
+</Steps>
+
+## Workspace structure
+
+VES is a Cargo workspace. The `Cargo.toml` at the repository root defines shared dependency versions and workspace-wide lint settings. Individual components live under `components/`:
+
+```toml
+[workspace]
+members = [
+    "components/core-agent",
+    "components/heimdell",
+    "components/ves_lib",
+]
+resolver = "2"
+```
+
+| Member | Role |
+|---|---|
+| `components/core-agent` | The primary observability agent binary |
+| `components/heimdell` | The Heimdell server component |
+| `components/ves_lib` | Shared library code used by both components |
+
+All workspace members inherit `edition = "2024"`, `rust-version = "1.89"`, and the shared lint configuration from `[workspace.lints]`. See [Code style](/contributing/code-style) for what those lints enforce.
+
+## Build profiles
+
+The workspace ships three build profiles beyond the Cargo defaults:
+
+| Profile | Command | Use case |
+|---|---|---|
+| `dev` | `cargo build` | Local development — fast incremental builds, full debug info |
+| `release` | `cargo build --release` | Production binaries — LTO enabled, `panic = "abort"` |
+| `release-with-debug` | `cargo build --profile release-with-debug` | Profiling — release optimisations with debug symbols retained |
+
+<Tip>
+The `dev` profile uses `codegen-units = 256` and `incremental = true` to keep rebuild times short while iterating. The `release` profile uses `lto = true` and `codegen-units = 16` for maximum runtime performance.
+</Tip>

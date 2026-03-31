@@ -1,0 +1,181 @@
+---
+title: "Upgrading"
+description: "Safely upgrade the VES Core Agent to a newer version."
+---
+
+VES uses [semantic versioning](https://semver.org). The current version is `1.0.0-unstable`.
+
+<Warning>
+  **Pre-stable software.** The `1.0.0-unstable` designation means the public API and config schema may change between commits before the stable release. Always read the release notes and review your config file after pulling new changes. See the [GitHub Issues](https://github.com/H3IMD3LL-Labs-Inc/VES/issues) for the current roadmap.
+</Warning>
+
+## Upgrade paths
+
+<Tabs>
+  <Tab title="Source build">
+
+## Upgrading a source build
+
+Use this path if you built the Core Agent from source with `cargo build`.
+
+<Steps>
+  <Step title="Pull the latest changes">
+    Fetch and merge the latest commits from the `main` branch:
+
+    ```bash
+    git pull origin main
+    ```
+
+    Review the commit log or GitHub Issues for any breaking changes to the config schema before proceeding.
+  </Step>
+
+  <Step title="Rebuild the binary">
+    Compile a new release binary. The `-p core_agent` flag builds only the core-agent component, which is faster than rebuilding the entire workspace:
+
+    ```bash
+    cargo build --release -p core_agent
+    ```
+
+    The binary is written to `target/release/core_agent`.
+  </Step>
+
+  <Step title="Stop the running agent gracefully">
+    Send `SIGTERM` to allow the agent to flush in-flight events and close the LMDB databases cleanly before it exits:
+
+    ```bash
+    # If managed by systemd
+    systemctl stop core-agent
+
+    # Or directly by PID
+    kill -TERM $(pidof core_agent)
+    ```
+
+    Avoid `SIGKILL` unless the agent is unresponsive. An unclean shutdown may leave LMDB write transactions open; LMDB will recover on next startup, but a clean shutdown is preferable.
+  </Step>
+
+  <Step title="Replace the binary">
+    Copy the new binary over the old one. Adjust the destination path to wherever you installed the agent:
+
+    ```bash
+    sudo cp target/release/core_agent /usr/local/bin/core_agent
+    ```
+  </Step>
+
+  <Step title="Restart with the same config file">
+    Start the agent using the same config file path as before:
+
+    ```bash
+    # If managed by systemd
+    systemctl start core-agent
+
+    # Or directly
+    /usr/local/bin/core_agent --config /etc/ves/agent.toml
+    ```
+
+    Check the agent logs to confirm it started cleanly and is reconnecting to sources.
+  </Step>
+</Steps>
+
+  </Tab>
+  <Tab title="Docker">
+
+## Upgrading a Docker deployment
+
+Use this path if you run the Core Agent as a container.
+
+<Steps>
+  <Step title="Pull the new image">
+    If you are using a published image, pull the latest tag:
+
+    ```bash
+    docker pull ves/core-agent:latest
+    ```
+
+    If you build the image yourself, rebuild it from the updated source:
+
+    ```bash
+    git pull origin main
+    docker build -f docker/core-agent/Dockerfile -t ves/core-agent:latest .
+    ```
+  </Step>
+
+  <Step title="Recreate the container">
+    Stop and remove the old container, then start a new one using the same volume mounts. The LMDB data and config are on volumes that persist independently of the container lifecycle — no data is lost.
+
+    ```bash
+    # With docker run
+    docker stop ves-core-agent
+    docker rm ves-core-agent
+    docker run -d \
+      --name ves-core-agent \
+      --restart unless-stopped \
+      -v /etc/ves/agent.toml:/etc/ves/agent.toml:ro \
+      -v /var/log:/var/log:ro \
+      -v /var/lib/ves/data:/var/lib/ves/data \
+      ves/core-agent:latest
+    ```
+
+    With Docker Compose:
+
+    ```bash
+    docker compose pull
+    docker compose up -d --force-recreate
+    ```
+  </Step>
+
+  <Step title="Verify startup">
+    Check that the new container started cleanly:
+
+    ```bash
+    docker logs ves-core-agent --tail 50
+    ```
+  </Step>
+</Steps>
+
+  </Tab>
+</Tabs>
+
+## Config schema compatibility
+
+The config schema may change between versions while VES is in pre-stable development. Before upgrading:
+
+1. Check the [GitHub Issues](https://github.com/H3IMD3LL-Labs-Inc/VES/issues) for any issues or pull requests tagged with config schema changes.
+2. Compare your current `agent.toml` against the updated schema in `components/core-agent/src/config/schema/`.
+3. If fields have been renamed, added as required, or removed, update your config file before restarting the agent.
+
+A config validation error at startup will prevent the agent from running. The agent logs will report the specific field that failed to parse.
+
+## LMDB recovery data
+
+The Core Agent stores two categories of state in the `data_dir` directory:
+
+| Data | Description |
+|------|-------------|
+| `persisted_config_db` | The last successfully applied configuration snapshot, used to detect config drift on restart |
+| Source state databases | Per-source read offsets and recovery metadata, used to resume from where the agent left off after a restart or crash |
+
+**Upgrading does not reset recovery state.** After the new binary starts, it reads the existing LMDB databases and resumes from the last persisted position. This means:
+
+- Log file tailing continues from the last committed offset — no events are re-sent or lost due to the upgrade.
+- If the new version changes the LMDB schema, a migration may be required. Any such requirement will be documented in the release notes.
+
+<Note>
+  Do not delete the `data_dir` contents during an upgrade unless you are intentionally resetting all source state. Deleting it causes the agent to replay events from the beginning of each source on next startup.
+</Note>
+
+## Rollback
+
+If a new version introduces a regression, you can roll back by reversing the upgrade steps:
+
+1. Stop the running agent.
+2. Restore the previous binary (keep a copy before replacing it).
+3. If the config schema changed, restore the previous `agent.toml`.
+4. Restart the agent.
+
+The LMDB databases written by the newer version are generally readable by the older version unless a schema migration ran. If the old agent fails to open the databases, remove the `data_dir` contents and let the agent reinitialise from scratch.
+
+## Current roadmap
+
+VES is under active development. The current roadmap and open issues are tracked on GitHub:
+
+[https://github.com/H3IMD3LL-Labs-Inc/VES/issues](https://github.com/H3IMD3LL-Labs-Inc/VES/issues)

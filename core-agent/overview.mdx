@@ -1,0 +1,107 @@
+---
+title: "Core Agent overview"
+description: "What the Core Agent does and how it fits into the VES platform."
+---
+
+The Core Agent is a lightweight, single-binary Rust process deployed one-per-host. It runs continuously on each observed machine, collecting raw observability data from local sources, applying the operator-supplied configuration, buffering events during connectivity gaps, and forwarding enriched payloads to a HEIMDELL Server over gRPC or HTTP.
+
+Because each agent is fully autonomous, a network partition between a host and its HEIMDELL Server never causes data loss — the agent buffers events to its local LMDB store and replays them once connectivity is restored.
+
+## Responsibilities
+
+| Responsibility | Description |
+|---|---|
+| **Source collection** | Drive filesystem watchers, journald tailers, and socket listeners concurrently |
+| **Config lifecycle** | Receive, validate, diff, and apply configuration snapshots without a restart |
+| **Event buffering** | Persist raw source payloads to LMDB during backpressure or connectivity loss |
+| **Forward to HEIMDELL Server** | Batch and compress events, then ship them via the configured protocol |
+| **Self-telemetry** | Expose a Prometheus metrics endpoint and structured logs |
+
+## Lifecycle states
+
+The agent's runtime is described by a `LifecycleState` value, which determines what operations are permitted at any given moment.
+
+| State | Meaning |
+|---|---|
+| `Starting` | The agent process has started and is initialising sub-systems |
+| `Running` | All sub-systems are up; the agent is actively collecting and forwarding data |
+| `ApplyingConfig` | A new configuration snapshot is being diffed and applied; source changes may be in-flight |
+| `Stopping` | A shutdown signal was received; sub-systems are draining gracefully |
+| `Stopped` | All sub-systems have shut down cleanly |
+| `Failed` | An unrecoverable error has occurred; the agent will not process further events |
+
+<Note>
+  Config application can only begin when the agent is in the `Running` state. The `ConfigManager` enforces this via `LiveState::can_apply_config()`.
+</Note>
+
+## Health model
+
+The agent continuously re-evaluates its own health via `LiveState::refigure_health()`. The health status affects how the agent reports itself to the HEIMDELL Server.
+
+| Status | When it applies |
+|---|---|
+| `Healthy` | Lifecycle is not `Failed` and no source driver instance is in the `Failed` component state |
+| `Degraded` | At least one source driver instance has entered the `Failed` component state, but the agent itself is still running |
+| `Unhealthy` | The agent's lifecycle state is `Failed`, or the agent has been explicitly marked failed via `mark_failed()` |
+
+A `Degraded` agent continues to collect from healthy sources and forward events — only the failing source driver is affected. This means a single misbehaving log path does not bring down the entire agent.
+
+## Key sub-systems
+
+### Config lifecycle
+
+The config lifecycle sub-system manages how configuration changes reach the running agent without requiring a full restart. The `ConfigManager` orchestrates this flow:
+
+1. A `RootConfig` snapshot arrives from a `ConfigProvider` (static file, HEIMDELL Server remote API, or local/remote API).
+2. The snapshot is hashed to produce a `ConfigVersion`. If the version matches `last_applied_version`, it is silently discarded.
+3. `validate_root_config()` runs structural and semantic checks. Any `ValidationError` aborts the apply; `ValidationWarning` values are emitted as events but do not block application.
+4. `diff_root()` computes a set of `Operation` values describing exactly what changed — source additions/removals/updates, security changes, storage changes, etc.
+5. `apply_config()` executes each operation against the live `LiveState`.
+6. On success, the raw bytes are persisted to LMDB via `ConfigPersist`.
+
+Throughout this flow the config system emits `ConfigEvent` values (`NewSnapshot`, `Validation`, `DiffPresent`, `SnapshotApplied`, `PersistedSnapshot`, `PersistFailed`) that can be observed for auditing and diagnostics.
+
+### Source drivers
+
+Source drivers are the data ingestion layer. Three driver types are supported:
+
+- **Filesystem** — watches directories and files using `notify` and `walkdir`
+- **Journald** — tails systemd journal units using the journald cursor protocol
+- **Socket** — listens for incoming log streams over TCP, UDP, or a Unix domain socket
+
+Each driver instance produces `SourcePayload` values containing raw bytes and a `SourceOrigin` that records the precise provenance of every event (file path + inode + offset, journal cursor, or peer socket address).
+
+Multiple instances of each driver type can run concurrently. The `max_parallel_sources` runtime setting caps the total number.
+
+### Processor pipeline
+
+The processor pipeline transforms raw `SourcePayload` events into structured `EnrichedEvent` objects before they are batched and forwarded. In the current `v1.0.0-unstable` release the `ProcessorConfig` struct is intentionally minimal; the pipeline is designed to be extended in future versions with parsing rules, entity extraction, fingerprinting, and relationship tagging.
+
+### Recovery layer
+
+The recovery layer provides durable local storage backed by LMDB. Three named databases are maintained:
+
+| Database | Purpose |
+|---|---|
+| `watcher_db` | File watcher state — inode → `FileState` mappings for each filesystem source driver |
+| `tailer_db` | File tailing byte offsets — inode and byte position for each tailed file so tailing resumes at the correct position after restart |
+| `persisted_config` | Last-applied configuration snapshot (raw bytes) |
+
+On startup the agent reads the `persisted_config` database so that a previously applied configuration can be restored without contacting the HEIMDELL Server. The LMDB environment is opened with a 1 TiB map size ceiling and supports up to 10 named databases and 120 concurrent readers.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="wrench" href="/core-agent/installation">
+    Build the Core Agent from source and run it on your host.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/core-agent/configuration">
+    Complete reference for every configuration field.
+  </Card>
+  <Card title="Source drivers" icon="database" href="/core-agent/sources">
+    Configure filesystem, journald, and socket source drivers.
+  </Card>
+  <Card title="Security" icon="shield" href="/core-agent/security">
+    TLS, authentication, and secrets management.
+  </Card>
+</CardGroup>

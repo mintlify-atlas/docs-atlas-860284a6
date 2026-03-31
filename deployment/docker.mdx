@@ -1,0 +1,161 @@
+---
+title: "Docker deployment"
+description: "Run the VES Core Agent in a Docker container."
+---
+
+Running the Core Agent inside a container gives you consistent lifecycle management, clean isolation from host dependencies, and straightforward integration with existing container orchestration tooling.
+
+<Note>
+  The repository includes a placeholder Dockerfile at `docker/core-agent/Dockerfile`. The example below shows a recommended production build pattern based on the project's Rust toolchain version (`rust-version = "1.89"` in `Cargo.toml`).
+</Note>
+
+## Building the image
+
+The Core Agent is a single Rust binary. A multi-stage build keeps the final image small by discarding the compiler toolchain and intermediate build artifacts.
+
+```dockerfile docker/core-agent/Dockerfile
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM rust:1.89 AS builder
+
+WORKDIR /build
+
+# Cache dependency compilation separately from source changes
+COPY Cargo.toml Cargo.lock ./
+COPY components/core-agent/Cargo.toml components/core-agent/
+COPY components/ves_lib/Cargo.toml     components/ves_lib/
+COPY components/heimdell/Cargo.toml    components/heimdell/
+
+# Placeholder sources so Cargo can resolve the workspace
+RUN mkdir -p components/core-agent/src \
+             components/ves_lib/src \
+             components/heimdell/src \
+ && echo 'fn main() {}' > components/core-agent/src/main.rs \
+ && touch components/ves_lib/src/lib.rs \
+ && touch components/heimdell/src/lib.rs \
+ && cargo build --release -p core_agent \
+ && rm -rf components
+
+# Copy the real source and rebuild
+COPY . .
+RUN cargo build --release -p core_agent
+
+# ── Runtime stage ─────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --no-create-home --shell /sbin/nologin vesagent
+
+COPY --from=builder /build/target/release/core_agent /usr/local/bin/core_agent
+
+RUN mkdir -p /etc/ves /var/lib/ves/data \
+ && chown vesagent:vesagent /var/lib/ves/data
+
+USER vesagent
+
+ENTRYPOINT ["/usr/local/bin/core_agent"]
+CMD ["--config", "/etc/ves/agent.toml"]
+```
+
+Build the image from the repository root:
+
+```bash
+docker build -f docker/core-agent/Dockerfile -t ves/core-agent:latest .
+```
+
+## Running with `docker run`
+
+Mount your configuration file and the directories you want the agent to watch:
+
+```bash
+docker run -d \
+  --name ves-core-agent \
+  --restart unless-stopped \
+  -v /etc/ves/agent.toml:/etc/ves/agent.toml:ro \
+  -v /var/log:/var/log:ro \
+  -v /var/lib/ves/data:/var/lib/ves/data \
+  ves/core-agent:latest
+```
+
+## Docker Compose
+
+For most deployments, Docker Compose is easier to manage than bare `docker run` commands. The example below shows a complete service definition with the volume mounts described in the next section.
+
+```yaml docker-compose.yml
+version: "3.9"
+
+services:
+  core-agent:
+    image: ves/core-agent:latest
+    container_name: ves-core-agent
+    restart: unless-stopped
+    environment:
+      - HEIMDELL_SERVER_ENDPOINT=http://heimdell-server:9090
+    volumes:
+      # Agent configuration file — read-only
+      - /etc/ves/agent.toml:/etc/ves/agent.toml:ro
+      # Log directories to watch — read-only
+      - /var/log:/var/log:ro
+      - /srv/app/logs:/srv/app/logs:ro
+      # LMDB data directory — read-write, persisted across restarts
+      - ves-data:/var/lib/ves/data
+    # Required if you use the journald source (see warning below)
+    # volumes:
+    #   - /run/systemd/journal/socket:/run/systemd/journal/socket
+
+volumes:
+  ves-data:
+    driver: local
+```
+
+Start the service:
+
+```bash
+docker compose up -d
+```
+
+## Volume mounts explained
+
+| Mount path (container) | Purpose | Access |
+|------------------------|---------|--------|
+| `/etc/ves/agent.toml` | Agent configuration file | Read-only |
+| `/var/log` (or any log path) | Directories containing log files tailed by file sources | Read-only |
+| `/var/lib/ves/data` | LMDB storage — persists recovery state and source offsets across restarts | Read-write |
+
+The `data_dir` field in your `[storage]` config block must match the container path you mount. For example:
+
+```toml agent.toml (storage section)
+[storage]
+data_dir = "/var/lib/ves/data"
+storage_engine = "lmdb"
+```
+
+## Permissions
+
+- The agent needs **read** access to every log path listed in your source configuration.
+- The agent needs **read/write** access to the `data_dir` volume.
+- If you run the agent as a non-root user (as the example Dockerfile does), ensure the mounted host directories have appropriate permissions for that UID.
+
+<Warning>
+  The `journald` source reads from the systemd journal socket. This socket is not available inside a container by default. To use the journald source in Docker, mount the host journal socket explicitly:
+
+  ```yaml
+  volumes:
+    - /run/systemd/journal/socket:/run/systemd/journal/socket
+  ```
+
+  The container must also run with the `systemd-journal` group, or as root, to have permission to read from the socket.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration reference" icon="sliders" href="/core-agent/configuration">
+    Every option available in the Core Agent config file.
+  </Card>
+  <Card title="Environment providers" icon="server" href="/deployment/environments">
+    Automatically tag events with host and cloud identity metadata.
+  </Card>
+</CardGroup>

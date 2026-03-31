@@ -1,0 +1,313 @@
+---
+title: "Troubleshooting"
+description: "Diagnose and resolve common Core Agent issues."
+---
+
+Use the accordion items below to diagnose and fix the most common Core Agent problems. In all cases, start by examining the structured JSON logs at `Info` level or higher. Each log line includes a `level`, `timestamp`, and span fields that identify which component produced the message.
+
+<AccordionGroup>
+
+  <Accordion title='Agent fails to start with "PathNotFound"'>
+
+**Cause.** The validator checks every path listed in `[[sources.filesystem]]` entries and the `[storage]` `data_dir` for existence before allowing a config to be applied. If any path does not exist on the local filesystem, a `ValidationError::PathNotFound` is emitted and the snapshot is rejected.
+
+**Fix.**
+
+<Steps>
+  <Step title="Identify the missing path">
+    Look for a `Validation` event in the logs with `result: Failed`. The `path` field contains the exact string that could not be found.
+  </Step>
+  <Step title="Create or correct the path">
+    Either create the missing directory/file:
+
+    ```bash
+    mkdir -p /var/log/myapp
+    mkdir -p /var/lib/ves-agent
+    ```
+
+    Or correct the path in your config file to point to a location that exists.
+  </Step>
+  <Step title="Verify filesystem source paths">
+    Each `[[sources.filesystem]]` block with a `paths` list must reference files or directories that exist at the time the config is applied. Paths are validated at apply time, not at startup.
+
+    ```toml
+    [[sources.filesystem]]
+    id    = "app-logs"
+    paths = ["/var/log/myapp"]   # this directory must exist
+    ```
+  </Step>
+  <Step title="Restart the agent">
+    Once all paths exist, re-deliver the config (or restart the agent if using `StaticFile` provider) and confirm the `SnapshotApplied { status: Succeeded }` event appears in the logs.
+  </Step>
+</Steps>
+
+  </Accordion>
+
+  <Accordion title='Agent fails with "PermissionDenied" on the data directory'>
+
+**Cause.** The `[storage]` `data_dir` exists but is read-only or owned by a different user. The validator calls `path.metadata().permissions().readonly()` and emits `ValidationError::PermissionDenied` when the check returns `true`.
+
+**Fix.**
+
+<Steps>
+  <Step title="Check the directory permissions">
+    ```bash
+    ls -ld /var/lib/ves-agent
+    ```
+  </Step>
+  <Step title="Grant write access">
+    If the agent runs as `root`:
+
+    ```bash
+    chmod 755 /var/lib/ves-agent
+    ```
+
+    If the agent runs as a dedicated service user (recommended):
+
+    ```bash
+    chown ves-agent:ves-agent /var/lib/ves-agent
+    chmod 750 /var/lib/ves-agent
+    ```
+  </Step>
+  <Step title="Confirm the fix">
+    Run `ls -ld /var/lib/ves-agent` again and verify the agent user has `rwx` on the directory, then restart the agent.
+  </Step>
+</Steps>
+
+<Warning>
+  Avoid running the Core Agent as `root` in production. Create a dedicated system user with access only to the directories it needs.
+</Warning>
+
+  </Accordion>
+
+  <Accordion title='"DuplicateId" validation error'>
+
+**Cause.** Two or more source driver entries share the same `id` value. The validator collects all IDs from `[[sources.filesystem]]`, `[[sources.journald]]`, and `[[sources.socket]]` into a single `HashSet` and emits `ValidationError::DuplicateId` on the first collision.
+
+**Fix.** Each source driver instance must have a unique `id` across all source types. IDs are arbitrary strings — use descriptive names that reflect the data source.
+
+```toml
+# Incorrect — both entries share the same id
+[[sources.filesystem]]
+id    = "app-logs"
+paths = ["/var/log/app1"]
+
+[[sources.filesystem]]
+id    = "app-logs"       # duplicate — will fail validation
+paths = ["/var/log/app2"]
+
+# Correct
+[[sources.filesystem]]
+id    = "app1-logs"
+paths = ["/var/log/app1"]
+
+[[sources.filesystem]]
+id    = "app2-logs"
+paths = ["/var/log/app2"]
+```
+
+  </Accordion>
+
+  <Accordion title='"InsecureConfiguration" warning appears in logs'>
+
+**Cause.** The `[security]` block enables authentication but does not configure TLS. The cross-component validator emits `ValidationWarning::InsecureConfiguration { reason: "authentication enabled without TLS" }`. This is a warning, not an error — the config is still applied, but credentials are transmitted in plaintext.
+
+**Fix.** Enable TLS for the security block:
+
+```toml
+[security.tls]
+cert_path = "/etc/ves-agent/tls/server.crt"
+key_path  = "/etc/ves-agent/tls/server.key"
+```
+
+If you are running in a trusted private network and intentionally operating without TLS, you can acknowledge the warning and suppress it by removing the authentication configuration, or by documenting the exception in your security review. The agent will continue to function either way.
+
+  </Accordion>
+
+  <Accordion title='"MissingTlsMaterial" — TLS is configured but the certificate or key is missing'>
+
+**Cause.** `[security.tls]` is present in the config but `cert_path` or `key_path` is an empty string, or the files at those paths do not exist. The security validator checks `tls.cert_path.is_empty() || tls.key_path.is_empty()` and emits `ValidationError::InvalidConfiguration { reason: "global TLS enabled but cert/key missing" }`.
+
+**Fix.**
+
+<Steps>
+  <Step title="Check the configured paths">
+    ```toml
+    [security.tls]
+    cert_path = "/etc/ves-agent/tls/server.crt"
+    key_path  = "/etc/ves-agent/tls/server.key"
+    ```
+  </Step>
+  <Step title="Verify the files exist">
+    ```bash
+    ls -l /etc/ves-agent/tls/
+    ```
+  </Step>
+  <Step title="Generate or copy the certificate and key">
+    For testing with a self-signed certificate:
+
+    ```bash
+    mkdir -p /etc/ves-agent/tls
+    openssl req -x509 -newkey rsa:4096 -keyout /etc/ves-agent/tls/server.key \
+      -out /etc/ves-agent/tls/server.crt -days 365 -nodes \
+      -subj "/CN=ves-agent"
+    chmod 600 /etc/ves-agent/tls/server.key
+    ```
+
+    For production, use certificates issued by your CA or a managed certificate service.
+  </Step>
+</Steps>
+
+  </Accordion>
+
+  <Accordion title="File tailing not resuming after restart">
+
+**Cause.** The `tailer_db` LMDB database stores inode numbers and byte offsets for every file being tailed. If the data directory was wiped, the `data_dir` path changed between restarts, or the agent was moved to a different host without copying the LMDB files, the tailing offsets are gone and the agent starts each file from the beginning (or from the end, depending on the initial read policy).
+
+**Diagnosis.**
+
+1. Check the `[storage]` config and confirm `data_dir` points to the same directory used in the previous run.
+2. Verify `data.mdb` and `lock.mdb` exist in `data_dir`:
+   ```bash
+   ls -lh /var/lib/ves-agent/
+   ```
+3. Check `PersistenceEngine::check_env` — if this returns `false`, LMDB cannot open the environment at the specified path (possibly a permissions issue or corrupted file).
+
+**Fix.**
+
+- If the data directory was accidentally wiped, there is no recovery. The agent will start tailing from the file's current position. Ensure `data_dir` is on persistent storage going forward.
+- If `data_dir` changed, update the config to point to the original path, or copy the LMDB files to the new path while the agent is stopped:
+  ```bash
+  systemctl stop ves-agent
+  cp /old/data/dir/data.mdb /var/lib/ves-agent/
+  cp /old/data/dir/lock.mdb /var/lib/ves-agent/
+  systemctl start ves-agent
+  ```
+
+<Note>
+  Always stop the agent before copying LMDB files. Copying a live LMDB environment can produce a corrupt copy.
+</Note>
+
+  </Accordion>
+
+  <Accordion title="Config changes not being applied">
+
+**Cause.** `ConfigManager::process_config` computes a SHA-256 hash of the raw config bytes and compares it to `last_applied_version`. If the hashes match, the method returns immediately with an empty event list — no diff is computed and no apply is attempted. This happens when the config file was saved without any meaningful content change (e.g., only whitespace or comment edits that affect the raw bytes differently than intended).
+
+It can also happen if `diff_root` reports `has_changes == false` even though the hash is new — meaning the parsed `RootConfig` values are identical despite the raw bytes differing (e.g., reordering TOML keys).
+
+**Diagnosis.** Enable `log_level = "Debug"` and look for `ConfigEvent::NoChanges` in the logs. The event includes the version hash so you can confirm which snapshot the agent is comparing against.
+
+**Fix.** Make a meaningful change to the config — add or modify a source, change a field value — and re-deliver it. To force a re-apply from a `StaticFile` provider, you can temporarily change and then revert a non-consequential value (such as a comment rendered into a label), but a cleaner approach is to bump a version label in `[storage.metadata]` if that field is supported, or add a new source driver instance.
+
+  </Accordion>
+
+  <Accordion title="Journald source not collecting events">
+
+**Cause.** The journald source driver reads from the systemd journal socket. If the socket is not accessible — particularly inside Docker containers — or the configured `units` list does not match any active systemd units, no events are collected.
+
+**Fix.**
+
+<Steps>
+  <Step title="Verify the journal socket exists">
+    On the host:
+    ```bash
+    ls -l /run/systemd/journal/socket
+    ```
+    If running inside Docker, the socket must be bind-mounted:
+    ```bash
+    docker run ... -v /run/systemd/journal/socket:/run/systemd/journal/socket ves-agent
+    ```
+    Or in a Compose file:
+    ```yaml
+    volumes:
+      - /run/systemd/journal/socket:/run/systemd/journal/socket
+    ```
+  </Step>
+  <Step title="Verify the unit names match">
+    List active units on the host:
+    ```bash
+    systemctl list-units --type=service --state=running
+    ```
+    Then confirm the `units` list in your config uses the same names, including the `.service` suffix if required by your journal source driver implementation.
+  </Step>
+  <Step title="Check journal permissions">
+    The user running the agent must be a member of the `systemd-journal` group to read the journal:
+    ```bash
+    usermod -aG systemd-journal ves-agent
+    ```
+    Restart the agent after changing group membership.
+  </Step>
+</Steps>
+
+  </Accordion>
+
+  <Accordion title="High memory usage">
+
+**Cause.** Two `[agent]` subsections control in-memory buffering. `data_buffering.max_memory_bytes` caps the total size of the in-memory event buffer; `data_buffering.backpressure_threshold` is the fraction of that cap at which backpressure is applied to source drivers. Large `data_batching` settings — `max_events`, `max_batch_bytes`, or long `flush_interval` durations — cause the agent to accumulate more events in memory before flushing to the HEIMDELL Server.
+
+**Diagnosis.** Check the `[agent.data_buffering]` and `[agent.data_batching]` sections:
+
+```toml
+[agent.data_buffering]
+max_memory_bytes       = 134217728   # 128 MB
+backpressure_threshold = 104857600   # 100 MB (apply backpressure at ~78% full)
+
+[agent.data_batching]
+max_events     = 5000
+max_batch_bytes = 5242880   # 5 MB
+flush_interval  = "5s"
+```
+
+**Fix.**
+
+Lower `max_memory_bytes` to cap total buffer growth. Lower `backpressure_threshold` to trigger backpressure earlier. Reduce `flush_interval` or `max_events`/`max_batch_bytes` to flush smaller batches more frequently. If the HEIMDELL Server endpoint is unreachable, the agent may accumulate backlogged events — verify network connectivity.
+
+  </Accordion>
+
+  <Accordion title="Cannot connect to HEIMDELL Server">
+
+**Cause.** The `[agent.network]` section configures the upstream endpoint. If the endpoint is unreachable, the TLS configuration does not match the server's certificate, or the authentication credentials are incorrect, the agent will fail to forward events and its retry backoff will increase.
+
+**Fix.**
+
+<Steps>
+  <Step title="Check the endpoint configuration">
+    ```toml
+    [agent.network]
+    heimdell_server_endpoint = "https://heimdell.example.com:443"
+    protocol                 = "Grpc"
+    ```
+    Verify the hostname, port, and protocol match the HEIMDELL Server deployment.
+  </Step>
+  <Step title="Test basic connectivity from the agent host">
+    ```bash
+    curl -v https://heimdell.example.com:443
+    # or for gRPC:
+    grpc_cli ls heimdell.example.com:443
+    ```
+  </Step>
+  <Step title="Check TLS configuration">
+    If the server uses a custom CA, ensure the CA certificate is trusted on the agent host or configured in `[security.tls]`. Mismatched TLS settings — e.g., the agent is configured for mutual TLS but the server expects one-way TLS — will cause handshake failures.
+  </Step>
+  <Step title="Check firewall rules">
+    Confirm that outbound traffic from the agent host to the server's port is permitted:
+    ```bash
+    nc -zv heimdell.example.com 443
+    ```
+  </Step>
+  <Step title="Review retry configuration">
+    The `[agent.retries]` section controls how the agent backs off on failure:
+    ```toml
+    [agent.retries]
+    max_attempts    = 10
+    initial_backoff = "1s"
+    max_backoff     = "60s"
+    ```
+    Check the logs for retry events and the current backoff duration to understand how long the agent has been unable to reach the server.
+  </Step>
+</Steps>
+
+  </Accordion>
+
+</AccordionGroup>

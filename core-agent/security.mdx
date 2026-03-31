@@ -1,0 +1,247 @@
+---
+title: "Security"
+description: "Configure TLS, authentication, and secret management for the Core Agent."
+---
+
+The Core Agent's security model is configured under the `[security]` top-level section of your TOML config file. The section is optional — omitting it runs the agent without TLS or authentication. For any production deployment, both TLS and an authentication method should be configured.
+
+The `SecurityConfig` structure groups four independent concerns:
+
+| Sub-section | Purpose |
+|---|---|
+| `[security.tls]` | Mutual or one-way TLS for all outbound connections to HEIMDELL Server |
+| `[security.authentication]` | Credentials attached to every outbound request |
+| `[security.trust]` | Certificate authority configuration |
+| `[security.secrets]` | How the agent resolves secret values referenced in the config |
+
+Per-socket TLS for inbound connections is configured directly on each `[[sources.socket]]` entry — see [Source drivers](/core-agent/sources).
+
+---
+
+## Global TLS (`[security.tls]`)
+
+Configures the TLS context used for all outbound connections from the agent to the HEIMDELL Server. When this block is present, the agent presents the configured certificate on every outbound TLS handshake.
+
+<ParamField path="security.tls.cert_path" type="string" required>
+  Absolute path to a PEM-encoded X.509 certificate file. This certificate identifies the agent to the HEIMDELL Server. Required when the `[security.tls]` block is present — the validator emits an `InvalidConfiguration` error if either `cert_path` or `key_path` is an empty string.
+</ParamField>
+
+<ParamField path="security.tls.key_path" type="string" required>
+  Absolute path to the PEM-encoded private key that corresponds to `cert_path`. The key file must be readable by the agent process at startup.
+</ParamField>
+
+<ParamField path="security.tls.verify_server" type="boolean" default="true">
+  Verify the HEIMDELL Server's certificate against the configured trust roots. Set to `false` only in development or testing environments — disabling server verification exposes the agent to man-in-the-middle attacks.
+</ParamField>
+
+<ParamField path="security.tls.min_tls_version" type="enum" default="Tls12">
+  Minimum TLS version accepted for outbound connections.
+
+  | Value | Description |
+  |---|---|
+  | `Tls12` | Allow TLS 1.2 and later. Broadly compatible with existing infrastructure |
+  | `Tls13` | Allow only TLS 1.3. Stronger security; requires the HEIMDELL Server to also support TLS 1.3 |
+</ParamField>
+
+---
+
+## Authentication (`[security.authentication]`)
+
+Specifies credentials that the agent attaches to every request sent to the HEIMDELL Server. Authentication is optional but strongly recommended for any deployment where the HEIMDELL Server is reachable from untrusted networks.
+
+<Warning>
+  Enabling authentication without also configuring `[security.tls]` produces an `InsecureConfiguration` validation warning. Credentials transmitted without TLS are visible in plaintext on the network. Configure TLS before enabling authentication.
+</Warning>
+
+Three authentication methods are available:
+
+<ParamField path="security.authentication.type" type="enum">
+  Authentication method to use. One of `ApiKey`, `Token`, or `None`.
+
+  ---
+
+  **`ApiKey`** — Attach a static API key to each request as a header.
+
+  ```toml
+  [security.authentication]
+  type = "ApiKey"
+  key  = "${VES_API_KEY}"
+  ```
+
+  | Sub-field | Type | Description |
+  |---|---|---|
+  | `key` | string | The API key value. Can reference an environment variable using `${VAR_NAME}` syntax when `security.secrets.allow_env = true` |
+
+  ---
+
+  **`Token`** — Attach a bearer token to each request.
+
+  ```toml
+  [security.authentication]
+  type  = "Token"
+  token = "${VES_BEARER_TOKEN}"
+  ```
+
+  | Sub-field | Type | Description |
+  |---|---|---|
+  | `token` | string | The bearer token value. Supports environment variable substitution |
+
+  ---
+
+  **`None`** — Disable authentication. Equivalent to omitting the `[security.authentication]` block entirely.
+
+  ```toml
+  [security.authentication]
+  type = "None"
+  ```
+</ParamField>
+
+---
+
+## Trust configuration (`[security.trust]`)
+
+Controls which certificate authorities the agent trusts when verifying the HEIMDELL Server certificate. This section is relevant when `security.tls.verify_server = true` (the default).
+
+<ParamField path="security.trust.ca_bundle_path" type="string">
+  Absolute path to a PEM-encoded CA bundle file. Use this when your HEIMDELL Server presents a certificate signed by a private or internal CA that is not in the system trust store.
+</ParamField>
+
+<ParamField path="security.trust.use_system_roots" type="boolean" default="true">
+  Trust the operating system's certificate store in addition to `ca_bundle_path`. Set to `false` for fully air-gapped or private PKI deployments where you want to restrict trust exclusively to the CA bundle you supply.
+</ParamField>
+
+---
+
+## Secrets management (`[security.secrets]`)
+
+Controls how the agent resolves secret values that appear in the configuration file — API keys, tokens, and certificate key paths.
+
+<ParamField path="security.secrets.allow_env" type="boolean" default="false">
+  Allow secret values to be supplied via environment variables using `${VAR_NAME}` substitution syntax in any string configuration field. When `false`, environment variable references in the config are treated as literal strings.
+</ParamField>
+
+<ParamField path="security.secrets.secrets_provider" type="enum">
+  Optional external secrets backend. When set, the agent resolves secret references through the provider at startup instead of reading them from the config file or environment.
+
+  | Value | Description |
+  |---|---|
+  | `File` | Read secrets from a local file. Requires a `path` sub-field pointing to the secrets file |
+  | `AwsSecretsManager` | Fetch secrets from AWS Secrets Manager using the instance's IAM role |
+  | `HashiCorpVault` | Fetch secrets from HashiCorp Vault |
+
+  If omitted, secrets are resolved from the config file values or from environment variables (when `allow_env = true`).
+</ParamField>
+
+---
+
+## Per-socket TLS (`[[sources.socket.tls]]`)
+
+Each `[[sources.socket]]` entry can have its own independent TLS configuration for inbound connections. This is separate from the global `[security.tls]` block which applies to outbound connections.
+
+<ParamField path="tls.cert_path" type="string" required>
+  Path to the PEM-encoded certificate for this socket listener. The agent presents this certificate to connecting clients.
+</ParamField>
+
+<ParamField path="tls.key_path" type="string" required>
+  Path to the PEM-encoded private key corresponding to `cert_path`.
+</ParamField>
+
+<ParamField path="tls.require_client_auth" type="boolean" default="false">
+  Require connecting clients to present a valid certificate (mutual TLS). When `true`, connections that do not present a client certificate are rejected at the TLS handshake.
+</ParamField>
+
+<ParamField path="tls.trust.ca_bundle_path" type="string">
+  CA bundle used to verify client certificates when `require_client_auth = true`. If omitted and `use_system_roots = false`, all client certificates are rejected.
+</ParamField>
+
+<ParamField path="tls.trust.use_system_roots" type="boolean" default="false">
+  Trust the system CA store when verifying client certificates. For inbound socket TLS, this defaults to `false` — you generally want to pin the client CA explicitly rather than trusting the entire system store.
+</ParamField>
+
+<ParamField path="tls.min_tls_version" type="enum">
+  Minimum TLS version accepted on this socket. Accepts `Tls12` or `Tls13`. If omitted, the global default applies.
+</ParamField>
+
+---
+
+## Configuration examples
+
+<CodeGroup>
+
+```toml mTLS setup
+# Outbound mTLS: agent authenticates to HEIMDELL Server, and verifies the server cert
+[security.tls]
+cert_path       = "/etc/ves/certs/agent.crt"
+key_path        = "/etc/ves/certs/agent.key"
+verify_server   = true
+min_tls_version = "Tls13"
+
+[security.trust]
+ca_bundle_path   = "/etc/ves/certs/internal-ca.pem"
+use_system_roots = false
+
+[security.secrets]
+allow_env = false
+
+# Inbound socket listener with mutual TLS (clients must present a cert)
+[[sources.socket]]
+id        = "syslog-mtls"
+enabled   = true
+kind      = "Tcp"
+bind_addr = { host = "0.0.0.0", port = 6514 }
+
+[sources.socket.tls]
+cert_path           = "/etc/ves/certs/syslog-server.crt"
+key_path            = "/etc/ves/certs/syslog-server.key"
+require_client_auth = true
+min_tls_version     = "Tls13"
+
+[sources.socket.tls.trust]
+ca_bundle_path   = "/etc/ves/certs/client-ca.pem"
+use_system_roots = false
+```
+
+```toml API key auth setup
+# TLS with API key authentication using an environment variable for the key
+[security.tls]
+cert_path       = "/etc/ves/certs/agent.crt"
+key_path        = "/etc/ves/certs/agent.key"
+verify_server   = true
+min_tls_version = "Tls12"
+
+[security.authentication]
+type = "ApiKey"
+key  = "${VES_API_KEY}"
+
+[security.trust]
+use_system_roots = true
+
+[security.secrets]
+allow_env = true
+```
+
+```toml AWS Secrets Manager
+# Fetch all secrets from AWS Secrets Manager (uses instance IAM role)
+[security.tls]
+cert_path       = "/etc/ves/certs/agent.crt"
+key_path        = "/etc/ves/certs/agent.key"
+verify_server   = true
+min_tls_version = "Tls13"
+
+[security.authentication]
+type  = "Token"
+token = "${VES_BEARER_TOKEN}"
+
+[security.trust]
+use_system_roots = true
+
+[security.secrets]
+allow_env        = false
+secrets_provider = "AwsSecretsManager"
+```
+
+</CodeGroup>
+
+<Tip>
+  Rotate certificates without restarting the agent by delivering a new `RootConfig` snapshot via the HEIMDELL Server Remote API. The config lifecycle system diffs the updated `security` section and applies a `UpdateSecurity` operation to reload the credentials in-place.
+</Tip>

@@ -1,0 +1,286 @@
+---
+title: "Source drivers"
+description: "Configure filesystem, journald, and socket source drivers."
+---
+
+Source drivers are the data ingestion layer of the Core Agent. Each driver instance is defined as an entry in the `[[sources.<type>]]` array of your TOML config file. Multiple instances of different types can run concurrently, subject to the `agent.runtime.max_parallel_sources` limit.
+
+<Warning>
+  Overprovisioning source drivers degrades system performance in predictable ways: too many filesystem watchers exhaust OS inotify limits; too many socket listeners exhaust available ports; too many concurrent drivers cause CPU contention. Size your `max_parallel_sources` conservatively.
+</Warning>
+
+## Source payload model
+
+Every source driver produces `SourcePayload` values that flow through the processor pipeline. Each payload carries:
+
+| Field | Type | Description |
+|---|---|---|
+| `raw_data` | `Bytes` | The raw bytes read from the source (log line, journal entry, or socket message) |
+| `origin` | `SourceOrigin` | Provenance metadata describing exactly where the data came from |
+| `size` | `usize` | Byte length of `raw_data` |
+
+The `SourceOrigin` enum records different provenance fields depending on the driver type:
+
+| Variant | Fields | Description |
+|---|---|---|
+| `File` | `path`, `inode`, `offset` | Filesystem path, inode number, and byte offset within the file at the time of collection |
+| `Journald` | `unit`, `cursor` | Systemd unit name and the journal cursor string — allows resuming from the exact position after a restart |
+| `Socket` | `peer_addr`, `protocol` | Remote socket address and transport protocol (currently `Tcp`) |
+
+---
+
+## Source driver types
+
+<Tabs>
+  <Tab title="Filesystem">
+
+    The filesystem source driver watches directories and files for new content using OS-native `inotify` events, supplemented by `walkdir` for recursive directory traversal. It is the appropriate driver for any log file written to disk — application logs, web server access logs, audit logs, and so on.
+
+    Each `[[sources.filesystem]]` entry becomes one driver instance. Instances run concurrently up to the `max_parallel_sources` limit.
+
+    ### Configuration fields
+
+    <ParamField path="id" type="string" required>
+      Unique identifier for this source driver instance. Must be unique across **all** source driver types — the config validator rejects duplicate IDs with a `DuplicateId` error. Use descriptive names like `"nginx-access"` or `"app-error-logs"`.
+    </ParamField>
+
+    <ParamField path="enabled" type="boolean" default="true">
+      Enable or disable this driver instance without removing it from the config. Disabled instances are tracked in the config diff system and can be re-enabled by a subsequent config snapshot.
+    </ParamField>
+
+    <ParamField path="paths" type="string[]" required>
+      Absolute paths to watch. Can be files or directories. At least one path is required — a filesystem source with an empty `paths` array is rejected with an `InvalidConfiguration` error. All paths must exist at validation time; missing paths produce a `PathNotFound` error.
+    </ParamField>
+
+    <ParamField path="recursive" type="boolean" default="false">
+      When `true`, sub-directories beneath each path in `paths` are also watched. Uses `walkdir` for the initial tree walk and `inotify` IN_CREATE events to detect new sub-directories at runtime.
+    </ParamField>
+
+    <ParamField path="include_patterns" type="string[]">
+      Regex patterns (Rust `regex` crate syntax) that a file's name must match to be collected. An empty array matches all files. Patterns are evaluated against the filename only, not the full path.
+    </ParamField>
+
+    <ParamField path="exclude_patterns" type="string[]">
+      Regex patterns for filenames to exclude. Exclusions are evaluated after `include_patterns`. A file matching an exclusion pattern is skipped even if it matched an include pattern.
+    </ParamField>
+
+    <ParamField path="file_types" type="string[]">
+      File extensions (without the leading `.`) to match, e.g. `["log", "txt"]`. An empty array matches all extensions. Evaluated in addition to `include_patterns` — a file must satisfy both the extension list and the include pattern list to be collected.
+    </ParamField>
+
+    ### Example
+
+    ```toml
+    # Collect all .log files under /var/log/nginx, excluding rotated .gz files
+    [[sources.filesystem]]
+    id               = "nginx-logs"
+    enabled          = true
+    paths            = ["/var/log/nginx"]
+    recursive        = false
+    include_patterns = [".*\\.log$"]
+    exclude_patterns = [".*\\.gz$", ".*\\.1$"]
+    file_types       = ["log"]
+
+    # Collect all files under /opt/myapp/logs recursively
+    [[sources.filesystem]]
+    id        = "app-logs"
+    enabled   = true
+    paths     = ["/opt/myapp/logs"]
+    recursive = true
+    ```
+  </Tab>
+
+  <Tab title="Journald">
+
+    The journald source driver tails the systemd journal on Linux hosts, collecting structured log entries from specified systemd units. It uses the journal cursor protocol to maintain its position across restarts — no log entries are skipped or duplicated.
+
+    <Info>
+      The journald driver requires a Linux host running systemd with the journal socket accessible to the agent process. If your host does not run systemd, use the filesystem driver pointed at `/var/log/syslog` or equivalent instead.
+    </Info>
+
+    Each `[[sources.journald]]` entry becomes one driver instance. You can have multiple instances collecting from different sets of units.
+
+    ### Configuration fields
+
+    <ParamField path="id" type="string" required>
+      Unique identifier for this driver instance. Must be unique across all source driver types.
+    </ParamField>
+
+    <ParamField path="enabled" type="boolean" default="true">
+      Enable or disable this driver instance. The last-known journal cursor is preserved in LMDB when the instance is disabled, so re-enabling it resumes from the correct position.
+    </ParamField>
+
+    <ParamField path="units" type="string[]" required>
+      Systemd unit names to collect from, e.g. `["nginx.service", "postgresql.service"]`. An empty array collects from the entire journal — use with caution on busy systems.
+    </ParamField>
+
+    <ParamField path="since" type="string">
+      Optional starting position. Accepts either:
+      - A journal cursor string prefixed with `cursor:` (e.g. `"cursor:s=abc123def456"`) — resumes from an exact position.
+      - An ISO 8601 timestamp string (e.g. `"2025-01-01T00:00:00Z"`) — collects entries from this point in time.
+
+      If omitted and no cursor is stored in LMDB, the driver begins at the current tail of the journal (i.e. only new entries are collected).
+    </ParamField>
+
+    ### Example
+
+    ```toml
+    # Collect logs from nginx and the system itself
+    [[sources.journald]]
+    id      = "nginx"
+    enabled = true
+    units   = ["nginx.service"]
+
+    # Collect PostgreSQL logs, starting from a known cursor
+    [[sources.journald]]
+    id      = "postgres"
+    enabled = true
+    units   = ["postgresql.service"]
+    since   = "cursor:s=0000000000000001;i=1;b=abc;m=0;t=0;x=0"
+    ```
+  </Tab>
+
+  <Tab title="Socket">
+
+    The socket source driver listens for inbound log streams over TCP, UDP, or a Unix domain socket. It is the appropriate driver when other services push log data to the agent (syslog forwarding, custom application log shippers, etc.).
+
+    Each `[[sources.socket]]` entry becomes one driver instance. Instances of different `kind` values can coexist — for example, one TCP instance for syslog and one Unix socket instance for a local application.
+
+    ### Configuration fields
+
+    <ParamField path="id" type="string" required>
+      Unique identifier for this driver instance. Must be unique across all source driver types.
+    </ParamField>
+
+    <ParamField path="enabled" type="boolean" default="true">
+      Enable or disable this driver instance.
+    </ParamField>
+
+    <ParamField path="kind" type="enum" required>
+      Transport protocol for the socket listener.
+
+      | Value | Description |
+      |---|---|
+      | `Tcp` | Stream-oriented TCP listener. Supports TLS, `max_connections`, and `tcp_options` |
+      | `Udp` | Datagram-oriented UDP listener. Does not support TLS or `max_connections` |
+      | `Unix` | Unix domain socket. Requires a `Unix` bind address. Not available on systems without Unix socket support |
+    </ParamField>
+
+    <ParamField path="bind_addr" type="object" required>
+      Address to bind the listener to. Two variants are supported depending on socket `kind`:
+
+      **Inet** (for `Tcp` and `Udp`):
+      ```toml
+      bind_addr = { host = "0.0.0.0", port = 5140 }
+      ```
+
+      | Sub-field | Type | Description |
+      |---|---|---|
+      | `host` | string | IP address to bind (use `"0.0.0.0"` for all interfaces, `"127.0.0.1"` for loopback only) |
+      | `port` | u16 | Port number |
+
+      **Unix** (for `Unix` kind):
+      ```toml
+      bind_addr = { path = "/run/ves/agent.sock" }
+      ```
+
+      | Sub-field | Type | Description |
+      |---|---|---|
+      | `path` | string | Filesystem path for the Unix domain socket |
+    </ParamField>
+
+    <ParamField path="max_connections" type="usize">
+      Maximum number of simultaneous TCP connections accepted by this listener. Applies to `Tcp` kind only. New connection attempts beyond this limit are rejected until an existing connection closes. If omitted, no limit is enforced beyond the OS backlog.
+    </ParamField>
+
+    <ParamField path="tcp_options.nodelay" type="boolean" default="false">
+      Disable Nagle's algorithm (`TCP_NODELAY`). Recommended for low-latency log forwarding where batching is handled at the application layer. Set to `true` for syslog over TCP.
+    </ParamField>
+
+    <ParamField path="tcp_options.keep_alive_secs" type="u64">
+      Enable TCP keep-alive and set the idle timeout in seconds. Useful for detecting dead connections when senders crash without sending a FIN. If omitted, keep-alive is disabled.
+    </ParamField>
+
+    <ParamField path="tls.cert_path" type="string">
+      Path to the PEM-encoded certificate file for this socket listener. Required when `tls` is present.
+    </ParamField>
+
+    <ParamField path="tls.key_path" type="string">
+      Path to the PEM-encoded private key file. Required when `tls` is present.
+    </ParamField>
+
+    <ParamField path="tls.require_client_auth" type="boolean" default="false">
+      Require the connecting client to present a valid certificate (mutual TLS). When `true`, connections without a client certificate are rejected.
+    </ParamField>
+
+    <ParamField path="tls.trust.ca_bundle_path" type="string">
+      Path to a PEM-encoded CA bundle used to verify client certificates when `require_client_auth = true`.
+    </ParamField>
+
+    <ParamField path="tls.trust.use_system_roots" type="boolean" default="false">
+      Trust the system CA store in addition to any `ca_bundle_path` when verifying client certificates.
+    </ParamField>
+
+    <ParamField path="tls.min_tls_version" type="enum">
+      Minimum TLS version accepted on this socket. Accepts `Tls12` or `Tls13`. If omitted, the default is determined by the TLS library.
+    </ParamField>
+
+    ### Examples
+
+    ```toml
+    # TCP syslog listener with TLS and connection limit
+    [[sources.socket]]
+    id              = "syslog-tls"
+    enabled         = true
+    kind            = "Tcp"
+    bind_addr       = { host = "0.0.0.0", port = 6514 }
+    max_connections = 200
+
+    [sources.socket.tcp_options]
+    nodelay         = true
+    keep_alive_secs = 120
+
+    [sources.socket.tls]
+    cert_path           = "/etc/ves/certs/syslog.crt"
+    key_path            = "/etc/ves/certs/syslog.key"
+    require_client_auth = false
+    min_tls_version     = "Tls13"
+
+    # Plain UDP syslog (RFC 5424)
+    [[sources.socket]]
+    id        = "syslog-udp"
+    enabled   = true
+    kind      = "Udp"
+    bind_addr = { host = "127.0.0.1", port = 5140 }
+
+    # Unix domain socket for a local application
+    [[sources.socket]]
+    id        = "local-app"
+    enabled   = true
+    kind      = "Unix"
+    bind_addr = { path = "/run/ves/myapp.sock" }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Validation rules
+
+The config validator runs against every `RootConfig` snapshot before it is applied. The following rules apply to source driver configuration:
+
+| Error | Trigger | Resolution |
+|---|---|---|
+| `DuplicateId` | Two or more source driver instances share the same `id`, even across different driver types | Assign a unique `id` to each instance |
+| `PathNotFound` | A path in `filesystem.paths` or `storage.data_dir` does not exist on disk at validation time | Create the path or correct the config value |
+| `InvalidConfiguration` | A filesystem source has an empty `paths` array, or TLS is enabled without cert/key paths, or another structural constraint is violated | Fix the indicated field |
+| `PermissionDenied` | The agent process cannot write to `storage.data_dir` | Adjust directory permissions or run the agent as a user with write access |
+| `InvalidSocketBind` | A socket bind address is malformed or the port is already in use | Check the `bind_addr` values and confirm no other process holds the port |
+
+The following non-fatal warnings are also emitted:
+
+| Warning | Trigger |
+|---|---|
+| `InsecureConfiguration` | Authentication is enabled without a global TLS configuration |
+| `ResourceRisk` | Configuration patterns that risk OS resource exhaustion (e.g. excessive parallel sources) |
+| `DeprecatedField` | A configuration field has been deprecated and will be removed in a future release |

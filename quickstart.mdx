@@ -1,80 +1,163 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: "Quick start"
+description: "Get the VES Core Agent running and collecting logs in under 5 minutes."
 ---
 
-## Get started in three steps
+The Core Agent is the host-level component of VES. It tails log files, reads from systemd journals, and accepts data over sockets — then forwards enriched events to the HEIMDELL Server. This guide walks you through building from source and running your first collection pipeline.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  Docker deployment is also available if you prefer not to build from source. See [Docker deployment](/deployment/docker).
+</Note>
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Before you start, make sure the following are installed on your Linux host:
 
-### Step 2: Deploy your changes
+| Tool | Version | Install |
+|------|---------|---------|
+| **Rust** | 1.89 or later | [rust-lang.org/tools/install](https://rust-lang.org/tools/install/) |
+| **Git** | Any recent version | [git-scm.com/install](https://git-scm.com/install/) |
+| **Protobuf compiler** (`protoc`) | Any recent version | [protobuf.dev/installation](https://protobuf.dev/installation/) |
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Tip>
+  `systemd` / journald is optional. The filesystem and socket source drivers work on any Linux host. The journald source driver requires a host running systemd.
+</Tip>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Installation
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Clone the repository">
+    Clone the VES monorepo from GitHub:
 
-### Step 3: Go live
+    ```bash
+    git clone https://github.com/H3IMD3LL-Labs-Inc/VES.git
+    cd VES
+    ```
+  </Step>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+  <Step title="Build the Core Agent">
+    Build the `core-agent` binary in release mode. The workspace uses Rust 1.89 and the release profile enables LTO and full optimisations:
+
+    ```bash
+    cargo build --release -p core_agent
+    ```
+
+    The compiled binary lands at `target/release/core_agent`. Build time is typically 1–3 minutes on a modern machine with a warm cache.
+
+    <Info>
+      To build all workspace members (`core_agent`, `heimdell`, and `ves_lib`) in one pass, run `cargo build --release` without the `-p` flag.
+    </Info>
+  </Step>
+
+  <Step title="Create a configuration file">
+    The Core Agent reads its configuration from a TOML file. Create a minimal config that:
+
+    - Identifies the agent on your network
+    - Enables a filesystem source watching `/var/log`
+    - Configures LMDB-backed storage for crash recovery
+
+    ```toml config.toml
+    # ── Agent identity ──────────────────────────────────────────────────────────
+    [agent.identity]
+    node_id   = "my-host-agent-01"
+    hostname  = "my-host"
+    environment = "production"
+
+    # ── Runtime tuning (optional — shown with sensible defaults) ─────────────
+    [agent.runtime]
+    processor_worker_threads = 4
+    max_parallel_sources     = 8
+
+    # ── Data batching ─────────────────────────────────────────────────────────
+    [agent.data_batching]
+    max_events      = 1000
+    max_batch_bytes = 1048576   # 1 MiB
+    flush_interval  = { secs = 5, nanos = 0 }
+
+    # ── Filesystem source: tail everything under /var/log ────────────────────
+    [[sources.filesystem]]
+    id        = "varlog"
+    enabled   = true
+    paths     = ["/var/log"]
+    recursive = true
+
+    # Only collect plain-text log files; skip compressed archives
+    include_patterns = ["*.log", "*.txt"]
+    exclude_patterns = ["*.gz", "*.zip"]
+    file_types       = ["log"]
+
+    # ── Storage: persist watcher/tailer checkpoints to disk ──────────────────
+    [storage]
+    data_dir       = "/var/lib/ves/core-agent"
+    storage_engine = "lmdb"
+    max_disk_bytes = 10737418240   # 10 GiB
+
+    [storage.cleanup]
+    interval_secs    = 3600   # run cleanup every hour
+    max_period_secs  = 604800 # discard data older than 7 days
+    ```
+
+    Create the storage directory before starting the agent:
+
+    ```bash
+    sudo mkdir -p /var/lib/ves/core-agent
+    ```
+
+    <Warning>
+      The `storage.data_dir` directory must exist and be writable by the user running the agent. The validator will reject the config and refuse to start if the path is missing or read-only.
+    </Warning>
+  </Step>
+
+  <Step title="Run the Core Agent">
+    Start the agent, pointing it at the config file you just created:
+
+    ```bash
+    ./target/release/core_agent --config config.toml
+    ```
+
+    For a quick test without installing, you can run directly through Cargo:
+
+    ```bash
+    cargo run --release -p core_agent -- --config config.toml
+    ```
+  </Step>
+
+  <Step title="Verify collection is working">
+    On startup the Core Agent logs its lifecycle transitions to `stdout`. You should see output similar to:
+
+    ```text
+    INFO  core_agent: lifecycle state -> Starting
+    INFO  core_agent::config: loaded config from "config.toml" (provider=StaticFile)
+    INFO  core_agent::config: config version abc123ef — applying
+    INFO  core_agent::sources::filesystem: source driver "varlog" starting
+    INFO  core_agent::sources::filesystem: discovered /var/log/syslog (inode=131072, offset=0)
+    INFO  core_agent::sources::filesystem: discovered /var/log/auth.log (inode=131073, offset=0)
+    INFO  core_agent: lifecycle state -> Running
+    ```
+
+    Each log file under `/var/log` that matches your `include_patterns` is discovered and a `Tailer` is spawned per inode. As new lines are appended to those files, they are read and forwarded downstream as `SourcePayload` events.
+
+    When a file is rotated (for example, by `logrotate`), the Watcher detects the new inode and automatically starts a fresh Tailer for the rotated file — no restart required.
+
+    <Tip>
+      To produce test log lines immediately, run `logger "hello from VES"` in another terminal. This appends a line to the system journal and, depending on your `rsyslog` or `syslog-ng` config, to `/var/log/syslog` as well.
+    </Tip>
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core Agent configuration" icon="sliders" href="/core-agent/configuration">
+    Explore every configuration field: batching, retries, network, telemetry, and security.
+  </Card>
+  <Card title="Source drivers" icon="plug" href="/core-agent/sources">
+    Add journald and socket sources alongside the filesystem driver.
+  </Card>
+  <Card title="Docker deployment" icon="docker" href="/deployment/docker">
+    Run the Core Agent in a container with pre-built images.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand how the Core Agent, HEIMDELL Server, and ves_lib fit together.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,0 +1,190 @@
+---
+title: "Code style"
+description: "Code style and quality guidelines for VES contributions."
+---
+
+VES enforces code quality through workspace-level lint configuration in `Cargo.toml`. These rules apply to every crate in the workspace and are checked in CI. Pull requests that introduce new lint violations will not be merged.
+
+Run Clippy locally before pushing:
+
+```bash
+cargo clippy --all-targets --all-features
+```
+
+## Rust lints
+
+The following lints are set in `[workspace.lints.rust]` and apply to every workspace member.
+
+### `unsafe_code = "deny"`
+
+Unsafe Rust is prohibited. This is the only lint configured as `deny` rather than `warn` — it is a hard error, not a warning.
+
+```rust
+// Not allowed
+unsafe {
+    std::ptr::write(ptr, value);
+}
+```
+
+If you believe a specific use of unsafe is genuinely necessary, open an issue to discuss it before submitting a PR. Blanket `#[allow(unsafe_code)]` attributes will be rejected.
+
+### `dead_code = "warn"`
+
+Remove code that is never called or used. Dead code indicates incomplete refactors or design mistakes, and makes the codebase harder to navigate.
+
+### `missing_docs = "warn"`
+
+All public items — functions, structs, enums, traits, modules — must have doc comments. This applies to `pub` and `pub(crate)` items.
+
+```rust
+/// Processes a batch of incoming telemetry records.
+///
+/// Returns the number of records successfully written.
+pub fn flush_batch(&mut self) -> Result<usize> { ... }
+```
+
+### `missing_debug_implementations = "warn"`
+
+Public types must implement `Debug`. Derive it unless the type contains fields that cannot or should not be printed:
+
+```rust
+#[derive(Debug)]
+pub struct PipelineConfig {
+    pub name: String,
+    pub buffer_size: usize,
+}
+```
+
+## Clippy lints
+
+The following lints are set in `[workspace.lints.clippy]`.
+
+### `unwrap_used = "warn"`
+
+Do not call `.unwrap()` on `Option` or `Result`. Use the `?` operator, `map_err`, `ok_or`, or `unwrap_or_else` instead.
+
+<CodeGroup>
+
+```rust avoid.rs
+// Avoid
+let value = map.get("key").unwrap();
+let file = File::open(path).unwrap();
+```
+
+```rust prefer.rs
+// Prefer
+let value = map.get("key").ok_or(Error::MissingKey)?;
+let file = File::open(path).map_err(Error::Io)?;
+```
+
+</CodeGroup>
+
+### `expect_used = "warn"`
+
+`.expect()` is subject to the same restriction as `.unwrap()`. Only use it when the surrounding invariant makes the `None`/`Err` case genuinely impossible — and add a comment explaining why:
+
+```rust
+// Acceptable: the regex literal is known-valid at compile time
+let re = Regex::new(r"^\d+$").expect("literal regex is always valid");
+```
+
+### `panic = "warn"`
+
+Avoid explicit `panic!()` calls. Return a `Result` or propagate errors instead. The only acceptable panics are in tests and in the narrow case where continuing execution would corrupt state worse than crashing.
+
+### `todo = "warn"`
+
+`todo!()` macros must not appear in merged code. If you are scaffolding a feature, track it in a GitHub Issue and use a typed stub or return an `Err` instead.
+
+### `dbg_macro = "warn"`
+
+Remove all `dbg!()` calls before committing. Use the `tracing` crate for structured observability output:
+
+```rust
+tracing::debug!(key = %value, "processing record");
+```
+
+### `large_futures = "warn"`
+
+Async functions that hold large amounts of state across `.await` points generate oversized `Future` types that can cause stack overflows and poor performance. Keep async functions focused; move large data into `Box` or `Arc` when necessary.
+
+### `enum_glob_use = "warn"`
+
+Do not glob-import enum variants. Use explicit paths so it is always clear which type a variant belongs to:
+
+<CodeGroup>
+
+```rust avoid.rs
+// Avoid
+use PipelineError::*;
+match err { NotFound => ..., IoError(e) => ... }
+```
+
+```rust prefer.rs
+// Prefer
+use crate::error::PipelineError;
+match err {
+    PipelineError::NotFound => ...,
+    PipelineError::IoError(e) => ...,
+}
+```
+
+</CodeGroup>
+
+### `must_use_candidate = "warn"`
+
+Functions that return values callers should not silently discard should be annotated `#[must_use]`. Clippy will suggest candidates automatically; apply the attribute where the suggestion is correct.
+
+## Error handling conventions
+
+VES uses two different error-handling libraries with distinct roles:
+
+| Library | Use case |
+|---|---|
+| [`thiserror`](https://docs.rs/thiserror) | Library crates and module-level errors with explicit variants |
+| [`anyhow`](https://docs.rs/anyhow) | Application-level code and binary entry points where context matters more than variant matching |
+
+A component that other code calls (`ves_lib`) should define typed errors with `thiserror`. The binary entrypoints (`core-agent`, `heimdell`) can use `anyhow::Result` freely. Do not use `anyhow` inside `ves_lib`; callers cannot match on `anyhow::Error` variants.
+
+## Async conventions
+
+The workspace uses the `tokio` runtime. Keep the following in mind:
+
+- Use `tokio::spawn` for concurrent tasks, not `std::thread::spawn`, unless you have a specific reason to block a thread.
+- Be mindful of the `large_futures` lint. Avoid holding large local variables across `.await` points.
+- Prefer `tokio::select!` over manual future polling.
+- Use `tracing` instrumentation on async functions where latency matters: `#[tracing::instrument]`.
+
+## Module organisation
+
+Follow the existing pattern in the workspace:
+
+- A module's public API is re-exported from `mod.rs` (or the crate root `lib.rs`).
+- Implementation details live in submodules, which may be `pub(crate)` or private.
+- Avoid deeply nested module hierarchies — three levels is a practical maximum.
+- Place integration tests in a `tests/` directory at the crate root, not inline in `src/`.
+
+## Commit messages
+
+Commit messages must be clear and descriptive. Generic messages are grounds for PR rejection:
+
+<CodeGroup>
+
+```text avoid.txt
+fixed stuff
+updates
+bug fixes
+wip
+```
+
+```text prefer.txt
+fix(core-agent): handle EOF on closed gRPC stream gracefully
+feat(ves_lib): add SHA-256 fingerprint to PipelineRecord
+refactor(heimdell): extract buffer flush logic into BufferManager
+```
+
+</CodeGroup>
+
+<Tip>
+Use the imperative mood in the subject line ("add", "fix", "remove") and limit it to 72 characters. Add a blank line followed by a longer explanation in the body if the change is non-obvious.
+</Tip>

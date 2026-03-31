@@ -1,0 +1,121 @@
+---
+title: "Branching guidelines"
+description: "Branch naming conventions and the VES Git workflow."
+---
+
+VES uses a two-branch model in the source repository. Understanding it before you start will save you from having your PR automatically rejected or your workflow becoming unnecessarily complicated.
+
+## Core repository branches
+
+The source repository has two permanent, long-lived branches.
+
+### `main`
+
+`main` is always deployable. It contains the latest stable code that has passed all automated checks and manual review.
+
+- `BUILDING.md` assumes you are on this branch when producing release binaries.
+- **Do not open a PR from your fork directly into `main`.** These are automatically dismissed without review.
+
+### `integration`
+
+`integration` is the staging branch where all incoming pull requests land.
+
+- All PRs from forked repositories must target `integration`.
+- The full test suite runs against this branch. Passing those tests is what allows a change to eventually reach `main`.
+- **Always target `integration` when you push a PR from your fork.**
+
+<Note>
+PRs targeting the source repository's `main` branch are automatically rejected. Always set the base branch of your PR to `integration`.
+</Note>
+
+## Your fork's branches
+
+When you fork VES and clone it locally, you interact with your own fork. You do not need an `integration` branch in your fork — that branch exists only in the source repository. Adding one to your fork adds an unnecessary step with no benefit.
+
+### Naming your change branches
+
+Every piece of work lives on a dedicated "change branch" in your fork. Name branches using this pattern:
+
+```bash
+git checkout -b <contribution-type>/<name-of-work>
+```
+
+Examples:
+
+```bash
+git checkout -b feat/prometheus-remote-write-exporter
+git checkout -b fix/eof-crash-on-grpc-disconnect
+git checkout -b docs/development-setup-page
+git checkout -b refactor/buffer-flush-extract
+git checkout -b test/pipeline-record-fingerprint
+```
+
+Use lowercase kebab-case for `<name-of-work>`. Keep it short but descriptive enough that the purpose is obvious from the branch name alone.
+
+Common contribution type prefixes:
+
+| Prefix | Use for |
+|---|---|
+| `feat` | New features or capabilities |
+| `fix` | Bug fixes |
+| `docs` | Documentation changes |
+| `refactor` | Code restructuring without behaviour change |
+| `test` | New or improved tests |
+| `chore` | Build scripts, CI config, dependency bumps |
+| `perf` | Performance improvements |
+
+## Commit discipline
+
+Make incremental, logical commits. Do not bundle unrelated changes into a single commit — if your PR contains a mix of unrelated changes, the reviewer may ask you to split it before it can be accepted.
+
+Use Git's patch mode to stage only the relevant parts of a file when your working tree contains changes that belong to different logical units:
+
+```bash
+git add -p <file>
+```
+
+Once you have staged the right changes, commit with a meaningful message:
+
+```bash
+git commit -m "fix(core-agent): handle EOF on closed gRPC stream gracefully"
+```
+
+See [Code style](/contributing/code-style#commit-messages) for commit message conventions.
+
+## Pushing and opening a PR
+
+When your change branch is ready:
+
+```bash
+git push -u origin <contribution-type>/<name-of-work>
+```
+
+Then open a pull request on GitHub targeting the **source repository's `integration` branch** — not `main`, and not any branch in your own fork.
+
+## Cleaning up
+
+Once a change branch has been merged (or abandoned), delete it:
+
+```bash
+git branch -d <contribution-type>/<name-of-work>
+git push origin --delete <contribution-type>/<name-of-work>
+```
+
+Start a fresh change branch for the next piece of work. Do not reuse branches across unrelated changes.
+
+## Review turnaround
+
+VES currently has one maintainer. Expect a review response between **10 minutes and 24 hours** after opening a PR, depending on complexity and queue depth. You do not need to wait — you can start a new change branch and work on a separate contribution while awaiting feedback.
+
+<Tip>
+Working on multiple independent change branches in parallel is a good way to stay productive while PRs are under review. Just make sure each branch is isolated to one logical unit of work.
+</Tip>
+
+## Quick reference: things to avoid
+
+| Do not | Reason |
+|---|---|
+| Target PRs at `main` | They are automatically rejected |
+| Create an `integration` branch in your fork | Unnecessary; adds friction with no benefit |
+| Bundle unrelated changes in one commit | Reviewer may ask you to split the PR |
+| Reuse a change branch for different work | Makes history hard to follow; creates merge complexity |

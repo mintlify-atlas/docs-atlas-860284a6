@@ -1,0 +1,89 @@
+---
+title: "Contributing to VES"
+description: "How to contribute to VES — from filing issues to merging pull requests."
+---
+
+VES is an open-source observability data platform licensed under **AGPL-3.0**. Contributions of all kinds are welcome — whether you are fixing a typo, triaging a bug, writing a new feature, or improving test coverage.
+
+## Before you start
+
+Read these documents before making your first contribution. They define the expectations for everyone who participates in the project:
+
+- [Code of Conduct](/contributing/overview#code-of-conduct) — the community standards all contributors must follow
+- [Development setup](/contributing/development-setup) — how to build VES locally
+- [Code style](/contributing/code-style) — the lint rules and conventions enforced in CI
+- [Branching guidelines](/contributing/branching) — how to structure your branches and commits
+- [Pull request guidelines](/contributing/pull-requests) — how to open a PR that is likely to be accepted
+- `LICENSE.md` in the repository root — the AGPL-3.0 terms your contributions are released under
+- `SECURITY.md` — how to report security vulnerabilities privately
+
+## Ways to contribute
+
+You do not need to write code to contribute meaningfully to VES.
+
+| Contribution type | How to start |
+|---|---|
+| Bug reports | Open a GitHub Issue using the bug report template |
+| Feature requests | Open a GitHub Issue using the feature request template |
+| Code | Fork → branch → PR targeting `integration` |
+| Documentation | Same fork → branch → PR flow as code |
+| Testing | Add test cases or run the test suite and report gaps |
+| Triage | Help reproduce and label open issues |
+
+## Reporting issues
+
+The [GitHub Issues tracker](https://github.com/H3IMD3LL-Labs-Inc/VES/issues) is also the current project roadmap — open issues represent known bugs and planned work.
+
+Before opening a new issue:
+
+1. Search existing issues to confirm yours is not already reported or in progress.
+2. Use the provided issue template — do not file blank issues.
+3. Write a clear, descriptive title that summarises the problem at a glance.
+4. In the description, include:
+   - A precise description of the problem or request
+   - Steps to reproduce (for bugs)
+   - Relevant code blocks or configuration snippets
+   - Your operating system and architecture
+   - The VES version (output of `core-agent --version` or the Git commit SHA)
+   - Links to related issues, if any
+
+<Warning>
+Do not open a public GitHub Issue to report a security vulnerability. Follow the private disclosure process described in `SECURITY.md` and email [dennis.njuguna@heimdelllabs.cloud](mailto:dennis.njuguna@heimdelllabs.cloud) instead.
+</Warning>
+
+## Code of Conduct
+
+VES follows the [Contributor Covenant](https://www.contributor-covenant.org/) Code of Conduct. All community spaces — GitHub Issues, pull requests, and any other official channels — are covered.
+
+Examples of behaviour that contribute to a healthy community:
+
+- Demonstrating empathy and kindness toward other people
+- Being respectful of differing opinions, viewpoints, and experiences
+- Giving and gracefully accepting constructive feedback
+- Accepting responsibility and apologising to those affected by mistakes
+
+Examples of unacceptable behaviour:
+
+- Sexualised language or imagery, and unwanted sexual attention or advances
+- Trolling, insulting or derogatory comments, and personal or political attacks
+- Public or private harassment
+- Publishing others' private information without their explicit permission
+
+Violations may be reported to [dennis.njuguna@heimdelllabs.cloud](mailto:dennis.njuguna@heimdelllabs.cloud). All reports are reviewed promptly and confidentially.
+
+## Contributing sub-pages
+
+<CardGroup cols={2}>
+  <Card title="Development setup" icon="wrench" href="/contributing/development-setup">
+    Install required tools, clone the repo, build, and run the test suite.
+  </Card>
+  <Card title="Code style" icon="code" href="/contributing/code-style">
+    Lint rules, error-handling conventions, and module organisation patterns.
+  </Card>
+  <Card title="Branching guidelines" icon="git-branch" href="/contributing/branching">
+    Branch naming conventions, commit discipline, and the two-branch workflow.
+  </Card>
+  <Card title="Pull request guidelines" icon="git-pull-request" href="/contributing/pull-requests">
+    How to open, write, and shepherd a PR through review and merge.
+  </Card>
+</CardGroup>

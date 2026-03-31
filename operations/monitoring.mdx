@@ -1,0 +1,98 @@
+---
+title: "Monitoring"
+description: "Monitor the VES Core Agent using Prometheus metrics and structured logs."
+---
+
+The Core Agent exposes two primary observability surfaces: a Prometheus metrics endpoint for numeric telemetry and structured JSON logs via `tracing-subscriber`. Both are controlled by the `[agent.telemetry]` section of the configuration file.
+
+## Enabling metrics
+
+Set `metrics_enabled = true` to start an HTTP server that serves Prometheus-compatible metrics at `GET /metrics`.
+
+```toml
+[agent.telemetry]
+metrics_enabled = true
+metrics_port    = 9090
+log_level       = "Info"
+```
+
+When `metrics_port` is omitted, the agent uses an internal default. Set it explicitly if you need a specific port for firewall rules or service discovery.
+
+The metrics endpoint is served by [Hyper](https://hyper.rs/) and uses the [`prometheus`](https://crates.io/crates/prometheus) crate (v0.14) for registry management.
+
+## Log levels
+
+Logs are emitted via the `tracing` crate and formatted as structured JSON by `tracing-subscriber` with the `json` feature enabled. Every log line includes the level, a UTC timestamp, the span context, and any structured fields attached at the call site.
+
+The `log_level` field accepts one of the following values from the `LogLevel` enum:
+
+| Value | Description |
+|-------|-------------|
+| `"Trace"` | Extremely verbose. Includes every internal traversal and transaction boundary. Avoid in production. |
+| `"Debug"` | Detailed operational events useful during development and troubleshooting. |
+| `"Info"` | Normal operational messages: startup, config apply, source driver state changes. Recommended for production. |
+| `"Warn"` | Recoverable conditions that may require attention, including `InsecureConfiguration` and `ResourceRisk` validation warnings. |
+| `"Error"` | Errors that caused an operation to fail. The agent continues running unless the lifecycle transitions to `Failed`. |
+
+## Lifecycle and health states
+
+The agent maintains a `LiveState` that tracks both the overall lifecycle stage and an aggregate health status. These values appear in structured log output and can be surfaced through the metrics endpoint.
+
+### LifecycleState
+
+| State | Meaning |
+|-------|---------|
+| `Starting` | Agent is initialising: opening the LMDB environment, loading persisted config, starting source drivers. |
+| `Running` | All components are up. The agent is actively collecting and forwarding data. |
+| `ApplyingConfig` | A new config snapshot is being applied. Source drivers may be started, stopped, or reconfigured. |
+| `Stopping` | A shutdown signal was received; components are being torn down in order. |
+| `Stopped` | All components have exited cleanly. |
+| `Failed` | A fatal error occurred. The health status is `Unhealthy`. Inspect `last_error` in the logs. |
+
+### HealthStatus
+
+| Status | Meaning |
+|--------|---------|
+| `Healthy` | All source driver instances are running with no failures. |
+| `Degraded` | At least one source driver instance has a `Failed` component status while others continue running. Data collection is partial. |
+| `Unhealthy` | The lifecycle state is `Failed`. No data is being collected. |
+
+Health is recalculated by `LiveState::refigure_health` after every state transition. `Degraded` is intentional — the agent continues operating with working sources rather than shutting down entirely when a single driver fails.
+
+## ConfigEvent stream
+
+Every step in the config apply pipeline emits a `ConfigEvent`. These events are logged at the appropriate level and can be used to trace exactly what happened to a given configuration snapshot.
+
+| Event | When it fires |
+|-------|---------------|
+| `NewSnapshot` | A config snapshot was received from a `ConfigProvider`. Includes the source and computed SHA-256 version hash. |
+| `Validation { result: Success }` | Validation passed. May include `ValidationWarning` entries for non-blocking issues. |
+| `Validation { result: Failed }` | Validation failed with one or more `ValidationError` entries. The snapshot is not applied. |
+| `DiffPresent` | The incoming config differs from the last applied config. Apply will proceed. |
+| `NoChanges` | The SHA-256 hash matches `last_applied_version` or the diff produced no changes. No apply is performed. |
+| `SnapshotApplied { status: Started }` | Apply has begun. |
+| `SnapshotApplied { status: Succeeded }` | Apply completed successfully. |
+| `SnapshotApplied { status: Failed }` | Apply failed. The `error` field contains the reason. |
+| `PersistedSnapshot` | The raw config bytes were successfully written to `persisted_config_db` in LMDB. |
+| `PersistFailed` | The LMDB write failed. The config was applied in memory but will not survive a restart. |
+
+Each event includes the `ConfigProvider` source (`StaticFile`, `HEIMDELLServerRemoteAPI`, or `LocalRemoteAPI`) and the `ConfigVersion` (a 64-character hex SHA-256 hash). The short form — the first eight characters of the hash — appears in debug-formatted output as `ConfigVersion(abcd1234)` or `ConfigVersion(abcd1234-<timestamp>)` when a timestamp is present.
+
+## Tokio Console
+
+The agent is compiled with `tokio = { features = ["tracing"] }` and ships with `console-subscriber` as a dependency. During development you can enable Tokio Console to inspect async task scheduling, waker activity, and task lifetimes in real time.
+
+<Tip>
+  Set the `TOKIO_CONSOLE=1` environment variable (or configure `console-subscriber` in the agent startup code) to expose the Tokio Console gRPC endpoint at `127.0.0.1:6669`. Connect with `tokio-console` to view live task graphs. This is a development tool — do not expose the console endpoint on production hosts.
+</Tip>
+
+## Recommended production configuration
+
+```toml
+[agent.telemetry]
+metrics_enabled = true
+metrics_port    = 9090
+log_level       = "Info"
+```
+
+Scrape `http://<agent-host>:9090/metrics` from your Prometheus instance. Set `log_level = "Warn"` to reduce log volume on quiet hosts once the agent is confirmed healthy.

@@ -1,0 +1,102 @@
+---
+title: "Recovery and persistence"
+description: "How the Core Agent survives restarts and maintains state using LMDB."
+---
+
+The Core Agent uses [LMDB](https://www.symas.com/lmdb) (Lightning Memory-Mapped Database) as a durable local store for operational state. This recovery layer ensures that file tailing resumes at the correct byte offset after a restart, filesystem watcher registrations are not lost, and the last successfully applied configuration is available immediately on startup without waiting for a configuration provider to respond.
+
+## The persistence engine
+
+The `PersistenceEngine` struct wraps an LMDB `Environment` opened at the configured `data_dir`. The environment is created with the following fixed limits:
+
+| Parameter | Value |
+|-----------|-------|
+| Maximum named databases | 10 |
+| Maximum concurrent readers | 120 |
+| Memory-mapped size | 1 TB |
+
+The 1 TB map size is a virtual address space reservation, not actual disk usage. LMDB only allocates disk space for pages it writes, so the map size can safely be set large without pre-allocating storage.
+
+## Managed databases
+
+`AllowedDatabases` opens three named databases inside the environment on startup:
+
+### `watcher_db`
+
+Tracks which filesystem paths are currently being watched by the filesystem source driver. Entries are keyed by path and allow the agent to restore watcher registrations after a restart rather than rescanning from scratch.
+
+### `tailer_db`
+
+Tracks the read position for each file being tailed. Each entry stores an inode number and a byte offset, so the agent can seek to the exact position it last read when a file is re-opened after a restart or rotation. Without this, the agent would re-read already-processed content or skip events that arrived during downtime.
+
+### `persisted_config` (`persisted_config_db`)
+
+Stores the raw bytes of the last `RootConfig` that was successfully applied. On restart, the agent can load this config directly and resume operation without needing to contact the HEIMDELL Server or read a static file again.
+
+## Transaction model
+
+All LMDB reads use read-only transactions (`RoTransaction`) opened via `with_ro`. All writes use read-write transactions (`RwTransaction`) opened via `with_rw`. Each write transaction resolves to either a `TxOutcome::Commit` or `TxOutcome::Abort`, giving callers explicit control over whether a write is durable.
+
+LMDB allows only one active write transaction at a time. The agent serializes writes through a single writer path to avoid contention.
+
+## Config persistence flow
+
+When `ConfigManager::process_config` successfully applies a configuration snapshot, it immediately persists the raw config bytes to `persisted_config_db`. The sequence is:
+
+<Steps>
+  <Step title="Receive snapshot">
+    A `ConfigProvider` (static file, HEIMDELL Server remote API, or local API) delivers a new `RootConfig` and its raw bytes.
+  </Step>
+  <Step title="Compute version">
+    `ConfigVersion::from_root_config_bytes` computes a SHA-256 hash of the raw bytes. If the hash matches `last_applied_version`, processing stops — the config is unchanged.
+  </Step>
+  <Step title="Validate">
+    `validate_root_config` checks paths, permissions, TLS material, and duplicate IDs. Validation errors abort the apply and emit `ConfigEvent::Validation { result: Failed }` events.
+  </Step>
+  <Step title="Diff">
+    `diff_root` compares the incoming config against the last applied config. If no fields changed (`diff.has_changes == false`), the agent emits `ConfigEvent::NoChanges` and returns without writing.
+  </Step>
+  <Step title="Apply">
+    `apply_config` reconciles live state with the desired state described by the diff. On success, `last_applied_version` is updated.
+  </Step>
+  <Step title="Persist">
+    The raw bytes are written to `persisted_config_db` via `ConfigPersist::persist`. A `ConfigEvent::PersistedSnapshot` is emitted on success, or `ConfigEvent::PersistFailed` if the write fails.
+  </Step>
+</Steps>
+
+## StorageConfig reference
+
+The `[storage]` section of the agent config controls the recovery layer:
+
+```toml
+[storage]
+data_dir = "/var/lib/ves-agent"
+# storage_engine = "lmdb"   # only supported engine; omit to use default
+
+# Optional: cap LMDB file growth
+max_disk_bytes = 10737418240   # 10 GB
+
+# Optional: periodic cleanup of stale entries
+[storage.cleanup]
+max_period_secs = 86400    # entries older than this are eligible for removal
+interval_secs   = 3600     # how often the cleanup pass runs
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `data_dir` | string | Path to the directory where LMDB writes `data.mdb` and `lock.mdb`. Must exist and be writable. |
+| `max_disk_bytes` | integer (optional) | Soft cap on LMDB file size. The agent will not open the environment if the data file exceeds this value. |
+| `cleanup.max_period_secs` | integer (optional) | Maximum age in seconds for a database entry before it is considered stale during a cleanup pass. |
+| `cleanup.interval_secs` | integer | How frequently, in seconds, the cleanup task runs. |
+
+## Operational guidance
+
+**Use a persistent volume.** Set `data_dir` to a path that survives host reboots. Mounting a `tmpfs` or using `/tmp` means tailing offsets are lost on every restart and the agent re-reads all watched files from the beginning.
+
+**Verify the directory exists and is writable before starting the agent.** The validator checks both `path.exists()` and `path.metadata().permissions().readonly()` and emits `PathNotFound` or `PermissionDenied` errors respectively if either check fails.
+
+**Back up the data directory before migrating a host.** The `tailer_db` offsets are tied to the inode numbers on the source host's filesystem. If you move the agent to a different host and want to preserve the read position for each file, copy both `data.mdb` and `lock.mdb` to the new host before starting the agent.
+
+<Note>
+  Never copy or snapshot the LMDB data files while the agent is running. LMDB uses a memory-mapped file and the `lock.mdb` file to coordinate access. Copying a live environment can produce a corrupt copy. Stop the agent first, copy both `data.mdb` and `lock.mdb`, then restart.
+</Note>
